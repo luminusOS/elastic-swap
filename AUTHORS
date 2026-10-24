@@ -1,0 +1,36 @@
+Contributors to systemd-swap and biglinux-systemd-swap, whose work elastic-swap
+is built on, at the import point (upstream/master, 61cf629), in no particular order.
+Identities of the same person are merged. The full history is in
+https://github.com/biglinux/biglinux-systemd-swap and
+https://github.com/Nefelim4ag/systemd-swap.
+
+Vilgot Fredenberg
+Timofey Titovets (Nefelim4ag)
+Bruno Gonçalves
+Thorsten Schubert
+Oliver Old
+Barnabe di Kartola
+talesam
+Carrol Cox
+liberodark
+zeno
+Felix Yan
+Radek Podgorny
+Sergei Lomakov
+Sergey Kasmy
+monosans (Almaz)
+Alexandre Bouvier
+Ari Edelkind
+Balki
+Libor Klepáč
+Matthew Warren
+Maxim Kraev
+Mikalai Ramanovich
+Montecito
+Rolandas Valteris
+Rémi Somdecoste-Lespoune
+Sergey A
+Xiao Liang
+flyboy14
+meh
+zhangtao

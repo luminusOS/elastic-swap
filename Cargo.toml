@@ -1,11 +1,11 @@
 [package]
-name = "systemd-swap"
+name = "elastic-swap"
 version = "0.2.0"
 edition = "2021"
-authors = ["Timofey Titovets", "BigLinux Team"]
+authors = ["Timofey Titovets", "BigLinux Team", "LuminusOS contributors"]
 description = "Dynamic swap management for zram, zswap, and swap files"
-license = "GPL-3.0-or-later"
-repository = "https://github.com/biglinux/biglinux-systemd-swap"
+license = "GPL-3.0-only"
+repository = "https://github.com/luminusOS/elastic-swap"
 rust-version = "1.93"
 
 [dependencies]

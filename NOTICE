@@ -1,0 +1,35 @@
+elastic-swap
+Copyright (C) 2026 LuminusOS contributors
+
+elastic-swap is free software: you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free Software
+Foundation, version 3 of the License. See LICENSE.
+
+It is a derivative work, and the original notices stay with it:
+
+  biglinux-systemd-swap
+    Copyright (C) BigLinux Team and its contributors
+    https://github.com/biglinux/biglinux-systemd-swap
+    The Rust rewrite this project was forked from.
+
+  systemd-swap
+    Copyright (C) Timofey Titovets (Nefelim4ag) and its contributors
+    https://github.com/Nefelim4ag/systemd-swap
+    The original Python implementation.
+
+The people behind both are listed in AUTHORS. The complete history is in the
+two upstream repositories above, and in this project's repository.
+
+Licence of the combined work. Many source files carry
+"SPDX-License-Identifier: GPL-3.0-or-later", granted by their authors. The
+earliest systemd-swap code shipped the GPLv3 text without an "or later" grant,
+and a later contributor cannot widen what an earlier one granted. elastic-swap
+is therefore distributed under GPL-3.0-only, which every contributor's terms
+allow. The per-file headers are left as their authors wrote them.
+
+Third-party code. The binary statically links Rust crates under the MIT and
+BSD-3-Clause licences (several are dual MIT or Apache-2.0, and the MIT terms
+are used). Their notices are in LICENSE.dependencies, included in the RPM and
+in the source tarball and generated from the vendored crates.
+
+elastic-swap is not part of systemd and is not endorsed by the systemd project.

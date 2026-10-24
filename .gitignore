@@ -31,6 +31,7 @@ VTE-llms.txt
 #  before PyInstaller builds the exe, so as to inject date/other infos into it.
 *.manifest
 *.spec
+!packaging/*.spec
 
 # Installer logs
 pip-log.txt
@@ -175,3 +176,6 @@ biglinux-livecd/
 # Local-only notes, not part of the repository
 SECURITY.md
 REVIEW.md
+
+# RPM build output
+/dist/
