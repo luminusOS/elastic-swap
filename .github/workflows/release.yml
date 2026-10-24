@@ -1,0 +1,74 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  rpm:
+    runs-on: ubuntu-24.04
+    # The image installs this RPM for the same Fedora release, so build in it.
+    container: registry.fedoraproject.org/fedora@sha256:8f5853edbac9ec4084334d81590cce5566ca6c517ab793976ec41f8b62efda3f # fedora:45
+    steps:
+      - name: install build tools
+        run: dnf -y install git rpm-build rust cargo systemd-rpm-macros e2fsprogs xz tar gzip
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: build the RPM and the source tarballs
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          bash packaging/build-rpm.sh
+      - name: collect the release files
+        run: |
+          set -euo pipefail
+          mkdir release
+          cp dist/*.x86_64.rpm dist/*.src.rpm dist/elastic-swap-*.tar.* release/
+          rm -f release/*debuginfo* release/*debugsource*
+          (cd release && sha256sum ./* | sed 's# \./# #' > SHA256SUMS && cat SHA256SUMS)
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-files
+          path: release/
+          if-no-files-found: error
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: rpm
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-files
+          path: release
+      - name: the tag must match the package version
+        run: |
+          set -euo pipefail
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
+          [ "v${version}" = "${GITHUB_REF_NAME}" ] || { echo "tag ${GITHUB_REF_NAME} does not match Cargo.toml ${version}"; exit 1; }
+          ls release/elastic-swap-"${version}"-1.fc45.x86_64.rpm
+      - name: create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          {
+            echo "elastic-swap ${GITHUB_REF_NAME}"
+            echo
+            echo "The x86_64 RPM is built for Fedora 45. The .src.rpm and the two"
+            echo "tarballs are the corresponding source (GPLv3 section 6)."
+            echo
+            echo "SHA-256:"
+            echo '```'
+            cat release/SHA256SUMS
+            echo '```'
+          } > notes.md
+          gh release create "${GITHUB_REF_NAME}" release/* \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "elastic-swap ${GITHUB_REF_NAME}" \
+            --notes-file notes.md
