@@ -3,6 +3,17 @@ name: release
 on:
   push:
     tags: ["v*"]
+    branches: [master]
+    paths:
+      - ".github/workflows/release.yml"
+      - "packaging/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "Makefile"
+      - "include/**"
+      - "man/**"
+      - "src/**"
+      - "tests/**"
   workflow_dispatch:
 
 permissions:
