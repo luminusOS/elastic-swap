@@ -1,4 +1,4 @@
-# caveman: unified BigLinux Rust CI
+# Rust CI inherited from biglinux-systemd-swap
 # customize: env.SYSTEM_LIBS, env.BIN_SIZE_MAX_MIB
 name: ci
 
@@ -17,22 +17,9 @@ env:
   RUST_BACKTRACE: "1"
   SYSTEM_LIBS: "common"
   BIN_SIZE_MAX_MIB: "10"
-  BIN_NAME: "systemd-swap"                # release artifact under target/release/<name>
+  BIN_NAME: "elastic-swap"                # release artifact under target/release/<name>
 
 jobs:
-  shellcheck:
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-      - name: install shellcheck
-        run: sudo apt-get update -qq && sudo apt-get install -y shellcheck
-      # The shell in this repo has no .sh suffix: the boot helper and the
-      # pacman install script (sourced by pacman, so no shebang).
-      - name: lint shell scripts
-        run: |
-          shellcheck -S warning src/pre-systemd-swap
-          shellcheck -s bash -S warning pkgbuild/pkgbuild.install
-
   fmt:
     runs-on: ubuntu-24.04
     steps:

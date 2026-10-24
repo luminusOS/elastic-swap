@@ -26,7 +26,7 @@ may get processes OOM-killed, and the daemon may be restarted between runs.
 Install the build under test on the test machine, restart the service, then:
 
 ```sh
-sudo systemctl restart systemd-swap && sleep 20
+sudo systemctl restart elastic-swap && sleep 20
 ./run.sh mixed python3 load.py comp:3072 random:2560
 ./run.sh compressible python3 load.py comp:6144
 ./run.sh random python3 load.py random:5120

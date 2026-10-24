@@ -1,8 +1,8 @@
-// systemd-swap - Dynamic swap management for Linux
+// elastic-swap - Dynamic swap management for Linux
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! `systemd-swap` CLI binary. Parses subcommands (start/status/autoconfig) and
-//! drives the swap unit lifecycle using the `systemd_swap` library crate.
+//! `elastic-swap` CLI binary. Parses subcommands (start/status/autoconfig) and
+//! drives the swap unit lifecycle using the `elastic_swap` library crate.
 
 use std::fs;
 use std::path::Path;
@@ -10,23 +10,24 @@ use std::process::{Command, Stdio};
 
 use clap::{Parser, Subcommand};
 
-use systemd_swap::autoconfig::{RecommendedConfig, SwapMode as AutoSwapMode, SystemCapabilities};
-use systemd_swap::config::{Config, WORK_DIR};
-use systemd_swap::defaults;
-use systemd_swap::helpers::{am_i_root, makedirs};
-use systemd_swap::meminfo::get_mem_stats;
-use systemd_swap::swapfile::SwapFile;
-use systemd_swap::systemd::notify_ready;
-use systemd_swap::zswap::ZswapBackup;
-use systemd_swap::{error, info, request_shutdown, warn};
+use elastic_swap::autoconfig::{RecommendedConfig, SwapMode as AutoSwapMode, SystemCapabilities};
+use elastic_swap::config::{Config, WORK_DIR};
+use elastic_swap::defaults;
+use elastic_swap::helpers::{am_i_root, makedirs};
+use elastic_swap::meminfo::get_mem_stats;
+use elastic_swap::swapfile::{self, SwapFile, SwapFileConfig};
+use elastic_swap::systemd::notify_ready;
+use elastic_swap::tuning;
+use elastic_swap::zswap::ZswapBackup;
+use elastic_swap::{error, info, request_shutdown, warn};
 
 #[derive(Parser)]
-#[command(name = "systemd-swap")]
+#[command(name = "elastic-swap")]
 #[command(about = "Dynamic swap management for zram, zswap, and swap files")]
 #[command(version)]
 struct Cli {
     // caveman: global --dry-run. prints plan, no mutations.
-    // applies to start and downstream modprobe/fstab/sysfs writes.
+    // applies to start and downstream modprobe/sysfs writes.
     /// Show what would be done without mutating the system
     #[arg(long, global = true)]
     dry_run: bool,
@@ -43,6 +44,8 @@ enum Commands {
     Status,
     /// Show recommended configuration for this system
     Autoconfig,
+    /// Create the swap directory before the daemon starts
+    Prepare,
 }
 
 /// Swap strategy based on filesystem detection
@@ -60,7 +63,7 @@ fn main() {
     let cli = Cli::parse();
     // caveman: propagate dry-run to lib-level flag so deep call sites
     // (zram sysfs writes, writeback) can short-circuit.
-    systemd_swap::set_dry_run(cli.dry_run);
+    elastic_swap::set_dry_run(cli.dry_run);
 
     let result = match cli.command {
         Some(Commands::Start) => {
@@ -72,6 +75,7 @@ fn main() {
         }
         Some(Commands::Status) => status(),
         Some(Commands::Autoconfig) => autoconfig(),
+        Some(Commands::Prepare) => prepare(),
         None => {
             // No subcommand provided, show help
             use clap::CommandFactory;
@@ -110,9 +114,9 @@ fn get_swap_mode(config: &Config) -> SwapMode {
 /// Start a background thread that periodically logs zswap statistics.
 /// Useful for observing pool growth and compression ratio.
 fn start_zswap_monitor() {
+    use elastic_swap::zswap;
     use std::thread;
     use std::time::Duration;
-    use systemd_swap::zswap;
 
     thread::spawn(move || {
         // Initial delay to let zswap settle
@@ -161,7 +165,7 @@ fn start_zswap_monitor() {
 /// - LRU inversion issues
 /// - Unpredictable memory pressure behavior
 fn disable_zswap_for_zram() {
-    use systemd_swap::zswap;
+    use elastic_swap::zswap;
 
     if zswap::is_available() && zswap::is_enabled() {
         info!("Disabling zswap (recommended when using zram)");
@@ -258,6 +262,32 @@ fn dry_run_plan() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// Create the swap directory outside the daemon's sandbox.
+///
+/// The unit runs this as `ExecStartPre=+`: under `ProtectSystem=strict` the
+/// directory is a bind mount that the daemon can no longer turn into a btrfs
+/// subvolume. Does nothing for modes without swap files. Reads only the
+/// configuration the daemon cannot rewrite: it runs with full privileges.
+fn prepare() -> Result<(), Box<dyn std::error::Error>> {
+    let config = Config::load_persistent()?;
+    let uses_swapfiles = !matches!(
+        get_swap_mode(&config),
+        SwapMode::Disabled | SwapMode::ZramOnly
+    );
+    if !uses_swapfiles {
+        return Ok(());
+    }
+
+    let path = SwapFileConfig::from_config(&config)?.path;
+    if elastic_swap::is_dry_run() {
+        println!("[dry-run] would: prepare {}", path.display());
+        return Ok(());
+    }
+    am_i_root()?;
+    swapfile::prepare_directory(&path)?;
+    Ok(())
+}
+
 /// Start the swap daemon
 fn start() -> Result<(), Box<dyn std::error::Error>> {
     am_i_root()?;
@@ -269,26 +299,15 @@ fn start() -> Result<(), Box<dyn std::error::Error>> {
     // Clean up after any previous instance
     clear_previous_instance();
 
-    // Clean up legacy swapfc/swapfile path
-    let legacy_path = Path::new("/swapfc/swapfile");
-    if legacy_path.exists() && !legacy_path.is_symlink() {
-        info!("Removing legacy path: {}", legacy_path.display());
-        if legacy_path.is_dir() {
-            let _ = fs::remove_dir_all(legacy_path);
-        } else {
-            let _ = fs::remove_file(legacy_path);
-        }
-    }
-
     // Initialize directories
     makedirs(WORK_DIR)?;
     makedirs(format!(
         "{}/system/local-fs.target.wants",
-        systemd_swap::config::RUN_SYSD
+        elastic_swap::config::RUN_SYSD
     ))?;
     makedirs(format!(
         "{}/system/swap.target.wants",
-        systemd_swap::config::RUN_SYSD
+        elastic_swap::config::RUN_SYSD
     ))?;
 
     let mut config = Config::load()?;
@@ -307,6 +326,9 @@ fn start() -> Result<(), Box<dyn std::error::Error>> {
 
     // Configure MGLRU early (protects working set during swap operations)
     configure_mglru(&config);
+    if swap_mode != SwapMode::Disabled {
+        tuning::apply(&config);
+    }
 
     // Determine effective mode
     let effective_mode = match swap_mode {
@@ -381,7 +403,7 @@ fn run_zram_swapfc(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
 /// (expansion/contraction). False when the pool could not start.
 fn spawn_zram_pool(config: &Config) -> bool {
     info!("Setting up ZramPool as primary swap...");
-    match systemd_swap::zram::ZramPool::new(config) {
+    match elastic_swap::zram::ZramPool::new(config) {
         Ok(mut pool) => match pool.start_primary() {
             Ok(()) => {
                 std::thread::spawn(move || {
@@ -412,7 +434,7 @@ fn run_zswap_swapfc(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
             swapfc.create_initial_swap()?;
 
             // Now configure zswap (after swap is available) - non-critical
-            match systemd_swap::zswap::start(config) {
+            match elastic_swap::zswap::start(config) {
                 Ok(backup) => {
                     let zswap_backup = Some(backup);
                     save_zswap_backup(&zswap_backup)?;
@@ -437,7 +459,7 @@ fn run_zswap_swapfc(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
 fn run_zram_only(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
     disable_zswap_for_zram();
 
-    match systemd_swap::zram::ZramPool::new(config) {
+    match elastic_swap::zram::ZramPool::new(config) {
         Ok(mut pool) => {
             let start_ok = match pool.start_primary() {
                 Ok(()) => true,
@@ -469,7 +491,7 @@ fn run_zram_only(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
 
 /// Keep the service alive with nothing to monitor until SIGTERM.
 fn idle_until_shutdown() {
-    while !systemd_swap::is_shutdown() {
+    while !elastic_swap::is_shutdown() {
         std::thread::sleep(std::time::Duration::from_secs(60));
     }
 }
@@ -481,7 +503,7 @@ fn run_manual(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
     );
 
     if config.get_bool("zswap_enabled") {
-        match systemd_swap::zswap::start(config) {
+        match elastic_swap::zswap::start(config) {
             Ok(backup) => {
                 let zswap_backup = Some(backup);
                 save_zswap_backup(&zswap_backup)?;
@@ -585,10 +607,10 @@ fn status() -> Result<(), Box<dyn std::error::Error>> {
     let kernel_swap_used = swap_total.saturating_sub(swap_free);
 
     // Collect zswap usage once (used in both Zswap and Swap sections)
-    let swap_usage = systemd_swap::meminfo::get_effective_swap_usage().ok();
+    let swap_usage = elastic_swap::meminfo::get_effective_swap_usage().ok();
 
     // --- Zswap ---
-    if let Some(zswap) = systemd_swap::zswap::get_status() {
+    if let Some(zswap) = elastic_swap::zswap::get_status() {
         if zswap.enabled {
             println!("Zswap ({}):", zswap.compressor);
             println!("  Pool limit:    {}% of RAM", zswap.max_pool_percent);
@@ -616,7 +638,7 @@ fn status() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // --- Zram ---
-    if let Some(stats) = systemd_swap::zram::get_zram_stats() {
+    if let Some(stats) = elastic_swap::zram::get_zram_stats() {
         if stats.orig_data_size > 0 {
             println!("\nZram:");
             println!("  Capacity:      {}", format_size(stats.disksize));
@@ -775,7 +797,7 @@ fn autoconfig() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use systemd_swap::config::Config;
+    use elastic_swap::config::Config;
 
     fn cfg(pairs: &[(&str, &str)]) -> Config {
         Config::from_pairs_for_tests(pairs.iter().map(|(k, v)| (*k, *v)))

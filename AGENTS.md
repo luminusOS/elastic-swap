@@ -1,8 +1,8 @@
-# AGENTS.md — biglinux-systemd-swap
+# AGENTS.md — elastic-swap
 
-Single Rust binary (`/usr/bin/systemd-swap`) + one bash one-shot helper.
+Single Rust binary (`/usr/bin/elastic-swap`). No shell scripts.
 Dynamic swap manager (zram pool / zswap / swapfc) launched by systemd at
-boot. No workspace, no async runtime. GPL-3.0-or-later.
+boot. No workspace, no async runtime. GPL-3.0-only (see NOTICE).
 
 ## Build / test / lint (real commands)
 
@@ -15,16 +15,15 @@ cargo doc --no-deps --all-features --workspace   # RUSTDOCFLAGS=-D warnings in C
 cargo deny check advisories bans licenses sources
 cargo audit -D warnings
 cargo machete --with-metadata
-bats tests/fstab_idempotent.bats                 # bash helper idempotency
 ```
 
-CI mirror: `.github/workflows/ci.yml` (jobs: shellcheck, fmt, clippy, test,
+CI mirror: `.github/workflows/ci.yml` (jobs: fmt, clippy, test,
 deny, audit, machete, doc, complexity, budgets). Cargo.lock is
 committed; gate runs with the locked tree. Binary-size budget 10 MiB.
 Behaviour under memory pressure is checked by hand on a test machine with
 `tests/stress/` (never on a workstation someone is using).
 
-## Module map (src/: 11 Rust files + 1 bash helper)
+## Module map (src/: 12 Rust files)
 
 | File | Responsibility |
 |------|----------------|
@@ -39,11 +38,11 @@ Behaviour under memory pressure is checked by hand on a test machine with
 | `zram.rs` | ZramPool state machine + monitor |
 | `zswap.rs` | zswap sysfs writes, backup/restore |
 | `swapfile.rs` | swapfc engine (btrfs NOCOW, preallocated files), mkswap/swapon cycle |
-| `src/pre-systemd-swap` | Bash one-shot (fstab edit + sysctl + early swapoff). Not Rust. |
+| `tuning.rs` | `vm.min_free_kbytes` and THP, written once at start |
 
 Non-src: `include/*.service` (systemd units), `include/swap-default.conf`
-(self-documenting config), `man/`, `pkgbuild/`
-(Arch/BigLinux), `Makefile` (DESTDIR install).
+(self-documenting config), `man/`,
+`packaging/` (RPM spec), `Makefile` (DESTDIR install).
 
 ## Where to edit
 
@@ -51,11 +50,11 @@ Non-src: `include/*.service` (systemd units), `include/swap-default.conf`
 - Config keys / parser → `config.rs` (+ doc in `include/swap-default.conf`).
 - New subprocess call → go through `helpers::run_cmd_output(&[&str])`; never
   `sh -c`. Unit names from paths → `systemd-escape` in `systemd.rs`.
-- Unit hardening → `include/systemd-swap.service` (keep H5.1 filters).
+- Unit hardening → `include/elastic-swap.service` (keep H5.1 filters).
 
 ## Invariants & docs
 
-- `INVARIANTS.md` — H1–H7 living contract (memory safety, argv, fstab,
+- `INVARIANTS.md` — H1–H7 living contract (memory safety, argv, fstab never written,
   MGLRU, hardening, config parser, shutdown). Cite by number.
 - `ARCHITECTURE.md` — module map, state machine, full external-process table.
 

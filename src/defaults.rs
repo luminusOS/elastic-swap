@@ -51,9 +51,9 @@ pub const ZRAM_CHECK_INTERVAL: u64 = 5;
 pub const ZRAM_WRITEBACK_SIZE: &str = "50%";
 // The backing files live alongside the swap files, in `swapfile_path`, because
 // that directory is already everything they need and there is no second place
-// worth maintaining: pre-systemd-swap creates and mounts it before the daemon
-// starts, it is a btrfs subvolume with NOCOW, it is named in
-// the unit's ReadWritePaths, and it sits outside snapshots of the root.
+// worth maintaining: `elastic-swap prepare` creates it before the daemon starts
+// as a btrfs subvolume with NOCOW, it is named in the unit's ReadWritePaths, and
+// it sits outside snapshots of the root.
 //
 // Sharing it is safe in both directions. swapfc only ever deletes entries whose
 // name parses as a number, and these are named `zram-writeback-<id>`; the one
@@ -97,7 +97,7 @@ pub const ZSWAP_ACCEPT_THRESHOLD: &str = "80";
 
 // ── SwapFile ─────────────────────────────────────────────────────────────────
 
-pub const SWAPFILE_PATH: &str = "/swapfile";
+pub const SWAPFILE_PATH: &str = "/var/swap";
 pub const SWAPFILE_CHUNK_SIZE: &str = "512M";
 pub const SWAPFILE_MAX_COUNT: u32 = 28;
 pub const SWAPFILE_MIN_COUNT: u32 = 1;

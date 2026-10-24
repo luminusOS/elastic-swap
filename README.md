@@ -1,9 +1,16 @@
-# systemd-swap
+# elastic-swap
 
-Smart dynamic swap management for Linux, written in Rust.
+Swap that grows and shrinks on demand, written in Rust. Cold pages are
+compressed in RAM first (zswap, or a zram pool) and spill to swap files that are
+created as memory runs short and removed once it recovers.
 
-Automatically detects hardware, selects the best swap strategy, and tunes the
-kernel for optimal memory management — no manual configuration required.
+elastic-swap is a fork of
+[biglinux-systemd-swap](https://github.com/biglinux/biglinux-systemd-swap), a
+Rust rewrite of [systemd-swap](https://github.com/Nefelim4ag/systemd-swap) by
+Timofey Titovets. It is not part of systemd. See [NOTICE](NOTICE) and [AUTHORS](AUTHORS).
+
+It targets image-based systems with a read-only root: swap files live in
+`/var/swap`, and nothing edits `/etc/fstab`.
 
 ## How It Works
 
@@ -11,9 +18,9 @@ kernel for optimal memory management — no manual configuration required.
 
 | Mode | Primary | Secondary | Selection |
 |------|---------|-----------|-----------|
-| `auto` | Auto-detected | Auto-detected | **Default** — recommended |
+| `zswap+swapfile` | Zswap (kernel) | Swap files (disk) | **Default** |
+| `auto` | Auto-detected | Auto-detected | Picks a mode from the hardware |
 | `zram+swapfile` | Zram (RAM) | Swap files (disk) | btrfs / ext4 / xfs with free space |
-| `zswap+swapfile` | Zswap (kernel) | Swap files (disk) | Large disk, SSD/NVMe |
 | `zram` | Zram (RAM) | None | LiveCD, low disk, tmpfs |
 | `manual` | Explicit flags | Explicit flags | Advanced users |
 | `disabled` | — | — | Service exits cleanly |
@@ -96,8 +103,8 @@ In `zswap+swapfile` mode, the kernel's zswap handles compression:
 
 ## Recommended Kernel Tuning
 
-At boot `pre-systemd-swap` sets `vm.min_free_kbytes` and THP `madvise`, and the
-daemon sets MGLRU `min_ttl_ms`. The other parameters are **not applied** — they
+On start the daemon sets `vm.min_free_kbytes` and THP `madvise` (switch off with
+`kernel_tuning=no`) and MGLRU `min_ttl_ms`. The other parameters are **not applied** — they
 are recommendations for zram/zswap. Configure them via
 `/etc/sysctl.d/99-swap.conf` or your distribution's tuning service.
 
@@ -135,21 +142,26 @@ are recommendations for zram/zswap. Configure them via
 
 ## Installation
 
-### Arch Linux / BigLinux / Manjaro
+### Fedora and other RPM systems
 
 ```bash
-cd pkgbuild
-makepkg -si
+packaging/build-rpm.sh          # writes dist/*.rpm; needs rpm-build, cargo, rust
+sudo dnf install dist/elastic-swap-*.x86_64.rpm
+sudo systemctl enable --now elastic-swap
 ```
+
+When publishing a release, attach `dist/*.src.rpm` and the two source tarballs
+to the same release as the binary RPM: GPLv3 section 6 requires the
+corresponding source to be offered where the binary is.
 
 ### Manual Build
 
-Requirements: Rust 1.93+, `util-linux`
+Requirements: Rust 1.93+, `util-linux`, `btrfs-progs` and `e2fsprogs` (for `chattr`)
 
 ```bash
 cargo build --release
 sudo make install
-sudo systemctl enable --now systemd-swap
+sudo systemctl enable --now elastic-swap
 ```
 
 ## Usage
@@ -157,7 +169,7 @@ sudo systemctl enable --now systemd-swap
 ### Check Status
 
 ```bash
-systemd-swap status
+elastic-swap status
 ```
 
 Shows zram pool stats (compression ratio, utilization, device count),
@@ -166,7 +178,7 @@ swap file details, and memory breakdown.
 ### Show Recommended Config
 
 ```bash
-sudo systemd-swap autoconfig
+sudo elastic-swap autoconfig
 ```
 
 Displays the auto-detected configuration for the current hardware.
@@ -174,22 +186,22 @@ Displays the auto-detected configuration for the current hardware.
 ### Restart
 
 ```bash
-sudo systemctl restart systemd-swap
+sudo systemctl restart elastic-swap
 ```
 
 ### View Logs
 
 ```bash
-journalctl -u systemd-swap -f
+journalctl -u elastic-swap -f
 ```
 
 ## Configuration
 
 Configuration files (in order of priority):
 
-1. `/usr/share/systemd-swap/swap-default.conf` — defaults (do not edit)
-2. `/etc/systemd/swap.conf` — user overrides
-3. `/etc/systemd/swap.conf.d/*.conf` — drop-in fragments
+1. `/usr/share/elastic-swap/swap-default.conf` — defaults (do not edit)
+2. `/etc/elastic-swap/swap.conf` — user overrides (not installed; create it)
+3. `/usr/lib/`, `/run/` and `/etc/elastic-swap/swap.conf.d/*.conf` — drop-in fragments
 
 All options support `${NCPU}` and `${RAM_SIZE}` variables, plus simple
 arithmetic with `$(( expr ))`.
@@ -224,13 +236,13 @@ zram_contract_threshold=15      # Contract pool below this utilization %
 
 ### Full Option Reference
 
-See `/usr/share/systemd-swap/swap-default.conf` for all available options
+See `/usr/share/elastic-swap/swap-default.conf` for all available options
 with descriptions.
 
 ## Architecture
 
 ```
-systemd-swap (Rust daemon)
+elastic-swap (Rust daemon)
 ├── main.rs          — CLI (clap), mode dispatch, kernel tuning, THP/MGLRU
 ├── lib.rs           — Module declarations, global SHUTDOWN/DRY_RUN flags
 ├── config.rs        — Config parser (key=value, ${VAR} expansion, arithmetic)
@@ -285,7 +297,7 @@ ZramPool monitor (5s interval):
 - [ARCHITECTURE.md](ARCHITECTURE.md) — module map, state machine, external
   processes.
 - [INVARIANTS.md](INVARIANTS.md) — H1–H7 living contract (memory safety,
-  subprocess argv, fstab atomicity, hardening, config parser, shutdown).
+  subprocess argv, no fstab writes, hardening, config parser, shutdown).
 
 Quick gate: `cargo fmt --all -- --check && cargo clippy --workspace
 --all-targets --all-features -- -D warnings && cargo test --all-features
@@ -293,4 +305,4 @@ Quick gate: `cargo fmt --all -- --check && cargo clippy --workspace
 
 ## License
 
-GPL-3.0-or-later
+GPL-3.0-only. See [NOTICE](NOTICE) for why and for the upstream credits.

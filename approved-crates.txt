@@ -79,7 +79,7 @@ shlex
 strsim
 subtle
 syn
-systemd-swap
+elastic-swap
 temp-dir
 tempfile
 thiserror

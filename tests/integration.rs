@@ -3,10 +3,10 @@
 //! Nothing here touches privileged sysfs/procfs paths or runs external commands.
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-use systemd_swap::autoconfig::{RecommendedConfig, SwapMode};
-use systemd_swap::config::Config;
-use systemd_swap::swapfile::SwapFileConfig;
-use systemd_swap::zram::ZramPoolConfig;
+use elastic_swap::autoconfig::{RecommendedConfig, SwapMode};
+use elastic_swap::config::Config;
+use elastic_swap::swapfile::SwapFileConfig;
+use elastic_swap::zram::ZramPoolConfig;
 
 // ── Autoconfig → ZramPoolConfig pipeline ─────────────────────────────────────
 
@@ -20,7 +20,7 @@ fn auto_injected_config_feeds_zram_pool() {
     // The RAM ceiling has to survive the whole autoconfig -> Config -> pool
     // path. It used to be absent from config_pairs(), so the pool fell back to
     // "no limit" and nothing bounded the RAM the zsmalloc pool could hold.
-    let ram = systemd_swap::meminfo::get_ram_size().unwrap();
+    let ram = elastic_swap::meminfo::get_ram_size().unwrap();
     assert_eq!(pool.mem_limit_bytes, ram * 50 / 100);
 }
 
@@ -28,7 +28,7 @@ fn auto_injected_config_feeds_zram_pool() {
 /// different ceiling is not overwritten by the auto-mode default.
 #[test]
 fn explicit_zram_mem_limit_survives_autoconfig() {
-    let ram = systemd_swap::meminfo::get_ram_size().unwrap();
+    let ram = elastic_swap::meminfo::get_ram_size().unwrap();
     // "4G" is here because an absolute ceiling used to parse as 0, which reads
     // as "no limit" — and the pool now derives its disksize from this number,
     // so a silent 0 means advertising zram_size with nothing backing it.

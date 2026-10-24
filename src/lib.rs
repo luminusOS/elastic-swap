@@ -1,4 +1,4 @@
-//! Core library for systemd-swap: dynamic swap management for Linux.
+//! Core library for elastic-swap: dynamic swap management for Linux.
 //!
 //! Exposes the public modules for the daemon binary and any future consumers.
 // SPDX-License-Identifier: GPL-3.0-or-later
@@ -11,6 +11,7 @@ pub mod helpers;
 pub mod meminfo;
 pub mod swapfile;
 pub mod systemd;
+pub mod tuning;
 pub mod zram;
 pub mod zswap;
 

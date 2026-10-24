@@ -1,6 +1,6 @@
 //! CLI smoke tests.
 //!
-//! Spawns the real `systemd-swap` binary via Cargo's `CARGO_BIN_EXE_*` env var
+//! Spawns the real `elastic-swap` binary via Cargo's `CARGO_BIN_EXE_*` env var
 //! and verifies end-user-observable behaviour: exit codes, help output,
 //! subcommand availability, and unprivileged-mode graceful failures.
 // SPDX-License-Identifier: GPL-3.0-or-later
@@ -8,7 +8,7 @@
 use std::process::Command;
 
 fn bin() -> &'static str {
-    env!("CARGO_BIN_EXE_systemd-swap")
+    env!("CARGO_BIN_EXE_elastic-swap")
 }
 
 // ── Help ────────────────────────────────────────────────────────────────────
@@ -22,7 +22,7 @@ fn help_flag_succeeds() {
         String::from_utf8_lossy(&out.stderr)
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains("systemd-swap"), "stdout was: {}", stdout);
+    assert!(stdout.contains("elastic-swap"), "stdout was: {}", stdout);
     assert!(stdout.contains("start"));
     // Stopping is the service manager's job: SIGTERM, no swapoff (H7.1).
     assert!(!stdout.contains("stop"));
@@ -40,7 +40,7 @@ fn no_args_prints_help_and_exits_zero() {
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
     // main.rs prints help when no subcommand given
-    assert!(stdout.contains("systemd-swap"));
+    assert!(stdout.contains("elastic-swap"));
 }
 
 // ── Read-only subcommands run without root ──────────────────────────────────

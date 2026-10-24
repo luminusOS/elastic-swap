@@ -1,4 +1,4 @@
-// Zram configuration for systemd-swap
+// Zram configuration for elastic-swap
 // Dynamic multi-ZRAM pool with adaptive expansion/contraction
 // SPDX-License-Identifier: GPL-3.0-or-later
 
@@ -409,8 +409,8 @@ impl ZramPoolConfig {
             )
             .unwrap_or(0),
             // Follows swapfile_path so the backing files sit with the swap files
-            // they belong beside: one directory that pre-systemd-swap has already
-            // created and mounted, that carries NOCOW, and
+            // they belong beside: one directory that `elastic-swap prepare`
+            // has already created, that carries NOCOW, and
             // that the hardened unit names in ReadWritePaths. An override has to
             // stay inside that ReadWritePaths list or ProtectSystem=strict will
             // refuse the write and writeback will silently never run.
@@ -1186,7 +1186,7 @@ impl ZramPool {
         }
 
         // Every device comes from hot_add (Linux 3.15+). Missing means the
-        // zram module is not loaded; pre-systemd-swap.service pulls in
+        // zram module is not loaded; elastic-swap.service pulls in
         // modprobe@zram.service for that.
         if !Path::new(ZRAM_HOT_ADD).exists() {
             let detail = "hot_add control node missing (zram module not loaded)".to_string();
@@ -2402,7 +2402,7 @@ mod tests {
     fn pool_config_writeback_path_accepts_writable_locations() {
         for good in [
             "/swapfile",
-            "/var/lib/systemd-swap",
+            "/var/lib/elastic-swap",
             "/mnt/disk2/swap",
             "/home/swap",
         ] {

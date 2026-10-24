@@ -1,4 +1,4 @@
-# caveman: cargo-deny baseline for BigLinux Rust
+# cargo-deny baseline inherited from biglinux-systemd-swap
 # checks: advisories | bans | licenses | sources
 
 [graph]

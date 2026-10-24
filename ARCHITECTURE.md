@@ -1,15 +1,15 @@
-# systemd-swap — Architecture
+# elastic-swap — Architecture
 
 ## 1. Purpose
 
-Dynamic swap manager for Linux. Single Rust binary (`/usr/bin/systemd-swap`)
+Dynamic swap manager for Linux. Single Rust binary (`/usr/bin/elastic-swap`)
 launched by a systemd unit at boot. It detects the host (RAM, free disk, root
 filesystem, live ISO) and brings up an appropriate swap topology:
 **zram pool** (primary high-priority compressed swap), **zswap** (compressed
 cache backed by a swap file), and/or **swapfc** (dynamic swap files with
-btrfs-NOCOW handling). Consumed by BigLinux at
-install time, replacing the legacy bash-based `systemd-swap` and the
-`auto-zram-and-swappiness` package.
+btrfs-NOCOW handling). Built for image-based systems whose root is read-only:
+swap files live in `/var/swap` and `/etc/fstab` is never touched. Forked from
+biglinux-systemd-swap (see `NOTICE`).
 
 ## 2. Crate layout
 
@@ -19,7 +19,7 @@ Single binary + library crate (`Cargo.toml`). One member, no workspace.
 |------------------------------|-------------------------------------------------------------------------------------------------|
 | `src/lib.rs`                 | Public re-exports, `SHUTDOWN` / `DRY_RUN` atomic flags, `#![deny(unsafe_code)]`.                |
 | `src/main.rs`                | clap CLI (`start`/`status`/`autoconfig`), mode dispatcher, signal handler, monitors.            |
-| `src/config.rs`              | Parses `/etc/systemd/swap.conf` + conf.d fragments, shell-style `${VAR}` + arithmetic expansion.|
+| `src/config.rs`              | Parses `/etc/elastic-swap/swap.conf` + conf.d fragments, `${VAR}` + arithmetic expansion.       |
 | `src/defaults.rs`            | Compile-time defaults (paths, MGLRU TTL, conservative fallbacks).                               |
 | `src/autoconfig.rs`          | `SystemCapabilities::detect()` → `RecommendedConfig`; picks `SwapMode` (ZramSwapfc / ZramOnly). |
 | `src/meminfo.rs`             | `/proc/meminfo`, `/proc/cpuinfo` readers, RAM/CPU helpers.                                      |
@@ -28,17 +28,16 @@ Single binary + library crate (`Cargo.toml`). One member, no workspace.
 | `src/zram.rs`                | ZramPool state machine: hot_add via sysfs → modprobe fallback, `mkswap`, monitor; grows only by slots RAM can back at 1:1, one priority per device, idle and huge-page writeback to a per-device loop-backed store. |
 | `src/zswap.rs`               | Sysfs writes to `/sys/module/zswap/parameters/*`, backup/restore of pre-existing settings.      |
 | `src/swapfile.rs`            | swapfc engine: btrfs subvol+NOCOW, preallocated files (`fallocate` on btrfs), `mkswap`/`swapon` cycle. |
-| `src/pre-systemd-swap`       | Bash one-shot helper (fstab edit + `vm.min_free_kbytes` + early `swapoff`). Not Rust.           |
-| `include/*.service`          | systemd unit files; copied verbatim by PKGBUILD.                                                |
-| `include/swap-default.conf`  | Shipped default config installed to both `/usr/share` and `/etc`.                               |
-| `man/*`                      | `swap.conf(5)` and `systemd-swap(8)` man pages.                                                 |
+| `src/tuning.rs`              | `vm.min_free_kbytes` (3% of RAM, max 512 MiB) and THP `madvise`, written once at start.         |
+| `include/elastic-swap.service` | systemd unit; `ExecStartPre=+ elastic-swap prepare` runs outside the sandbox.                 |
+| `include/swap-default.conf`  | Shipped defaults, installed to `/usr/share/elastic-swap`; nothing is installed to `/etc`.       |
+| `man/*`                      | `elastic-swap.conf(5)` and `elastic-swap(8)` man pages.                                                 |
 | `tests/*.rs`, `tests/stress/` | Unit/integration/CLI/boundaries; manual stress scripts (see §7).                               |
-| `tests/fstab_idempotent.bats`| bats test of the pre-systemd-swap shell helper's fstab append idempotency.                      |
-| `pkgbuild/PKGBUILD`          | Arch packaging (BigLinux fork).                                                                 |
+| `packaging/`                 | RPM spec and `build-rpm.sh` (vendored crates, offline build).                                   |
 
 ## 3. State machine + message flow
 
-Daemon (`systemd-swap start`):
+Daemon (`elastic-swap start`):
 
 ```
 parse CLI ──► DRY_RUN flag set (`--dry-run` never reaches start(): dry_run_plan())
@@ -50,8 +49,8 @@ am_i_root() ──► SystemCapabilities::detect()  // RAM, free disk, fstype, l
 clear_previous_instance()   // restores zswap, clears the work dir; running zram
    │                        // devices and swap files are adopted, not swapped off
    ▼
-Config::load()  ◄── /usr/share/systemd-swap/swap-default.conf
-                  ◄── /etc/systemd/swap.conf
+Config::load()  ◄── /usr/share/elastic-swap/swap-default.conf
+                  ◄── /etc/elastic-swap/swap.conf
                   ◄── conf.d fragments  (etc > run > lib precedence)
    │
    ▼
@@ -146,7 +145,7 @@ sizes are `u64`, paths are `Path`, unit names are first run through
 
 `--dry-run` is honoured by never entering the mutating paths: `start
 --dry-run` runs the read-only `dry_run_plan()`. A few zram leaves (writeback, `mem_limit` writes, orphan sweep) also
-check `systemd_swap::is_dry_run()` as a second guard; the rest do not.
+check `elastic_swap::is_dry_run()` as a second guard; the rest do not.
 
 ## 6. Security posture
 
@@ -160,7 +159,7 @@ check `systemd_swap::is_dry_run()` as a second guard; the rest do not.
   see §5 for what it does and does not guard.
 - Config parser deliberately rejects unknown arithmetic and clamps
   computed sizes (see `boundaries.rs` tests).
-- Heavy systemd unit hardening — `include/systemd-swap.service`:
+- Heavy systemd unit hardening — `include/elastic-swap.service`:
   `ProtectSystem=strict`, `CapabilityBoundingSet=CAP_SYS_ADMIN`,
   `SystemCallFilter=@system-service @swap @mount`,
   `ReadWritePaths=/sys /run -/swapfile` (every entry must
@@ -170,12 +169,11 @@ check `systemd_swap::is_dry_run()` as a second guard; the rest do not.
   `DeviceAllow=` — one entry promotes `DevicePolicy=auto` to `strict`, and the
   zram/loop nodes the daemon hot-adds at runtime cannot be allowlisted ahead
   of time (a `block-loop` entry once denied `/dev/zram*` and killed the pool).
-- `include/pre-systemd-swap.service` documents *why* certain hardenings
-  are off (kernel tunable writes, modprobe pull-in, host mount visibility).
-- fstab mutation is confined to `pre-systemd-swap` (bash, one-shot,
-  idempotent — see `tests/fstab_idempotent.bats`); the Rust daemon
-  *never* writes `/etc/fstab` (managed via transient `/run/systemd/system`
-  units only).
+- `elastic-swap prepare` is the only step that runs unsandboxed (`ExecStartPre=+`):
+  it makes `/var/swap` a NOCOW btrfs subvolume, which the daemon cannot do from
+  inside its own namespace, where the path is a bind mount.
+- elastic-swap *never* writes `/etc/fstab`; swap is managed through transient
+  `/run/systemd/system` units only.
 - No polkit / sudoers needed; service runs as root under systemd.
 - Invariants are enumerated in `INVARIANTS.md` (groups H1–H7); unit-file
   comments (`include/*.service`) and call sites cross-reference them.
@@ -188,9 +186,8 @@ check `systemd_swap::is_dry_run()` as a second guard; the rest do not.
 | Black-box library API       | `tests/integration.rs`              | Uses public surface only (`Config::from_pairs_for_tests`, `parse_size`, autoconfig).        |
 | Behavioural / config corpus | `tests/behavior.rs`                 | Writes realistic `swap.conf` fragments via `tempfile`, asserts effective subsystem configs. |
 | Numeric boundary            | `tests/boundaries.rs`               | Off-by-one cases on autoconfig thresholds, `parse_size` overflow guards, clamp limits.      |
-| CLI smoke                   | `tests/cli.rs`                      | Spawns `CARGO_BIN_EXE_systemd-swap`, asserts exit codes / help output / unprivileged start. |
+| CLI smoke                   | `tests/cli.rs`                      | Spawns `CARGO_BIN_EXE_elastic-swap`, asserts exit codes / help output / unprivileged start. |
 | Stress on real hardware     | `tests/stress/`                     | Manual, on a test machine only: load phases under a sampler, counts write errors and OOM kills. |
-| Shell helper                | `tests/fstab_idempotent.bats`       | bats run of `src/pre-systemd-swap`; asserts repeated invocation is idempotent.              |
 | Property / fuzz             | —                                   | Not currently present.                                                                      |
 | AT-SPI                      | —                                   | N/A (no GUI).                                                                               |
 
@@ -198,16 +195,16 @@ Run baseline: `cargo test --locked`. Stress procedure: `tests/stress/README.md`.
 
 ## 8. Packaging
 
-- Arch / BigLinux: `pkgbuild/PKGBUILD` (+ `pkgbuild.install`). Targets
-  `x86_64`, `aarch64`. Bundles:
-  - `/usr/bin/systemd-swap` (the Rust binary)
-  - `/usr/bin/pre-systemd-swap` (bash one-shot)
-  - `/usr/lib/systemd/system/{systemd-swap,pre-systemd-swap}.service`
-  - `/usr/share/systemd-swap/swap-default.conf`
-  - `/etc/systemd/swap.conf` (marked `backup=`)
-  - `/usr/share/man/man{5,8}/{swap.conf.5,systemd-swap.8}`
-- Replaces / conflicts: `systemd-swap`, `systemd-swap-git`,
-  `auto-zram-and-swappiness`, `systemd-oomd-defaults`.
+- RPM: `packaging/elastic-swap.spec`, built by `packaging/build-rpm.sh`
+  (`cargo vendor` tarball, offline build, `cargo test` in `%check`). Bundles:
+  - `/usr/bin/elastic-swap` (the Rust binary)
+  - `/usr/lib/systemd/system/elastic-swap.service`
+  - `/usr/lib/sysctl.d/60-elastic-swap.conf`
+  - `/usr/share/elastic-swap/swap-default.conf`
+  - `/usr/share/man/man{5,8}/{elastic-swap.conf.5,elastic-swap.8}`
+- Requires `btrfs-progs`, `e2fsprogs` (`chattr`), `util-linux`, `kmod`, `systemd`.
+  No `Conflicts:`: an image that ships `zram-generator-defaults` removes it
+  itself, because zswap and zram should not be combined.
 - No Flatpak (system service, not user-facing).
 - No AppStream metainfo (headless daemon).
 - No polkit policy (executed by systemd as root).

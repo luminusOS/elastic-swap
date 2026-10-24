@@ -7,10 +7,10 @@
 
 use std::io::Write;
 
-use systemd_swap::autoconfig::RecommendedConfig;
-use systemd_swap::config::Config;
-use systemd_swap::swapfile::SwapFileConfig;
-use systemd_swap::zram::ZramPoolConfig;
+use elastic_swap::autoconfig::RecommendedConfig;
+use elastic_swap::config::Config;
+use elastic_swap::swapfile::SwapFileConfig;
+use elastic_swap::zram::ZramPoolConfig;
 
 fn write_conf(content: &str) -> tempfile::NamedTempFile {
     let mut f = tempfile::NamedTempFile::new().unwrap();

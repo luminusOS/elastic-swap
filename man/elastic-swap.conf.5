@@ -1,25 +1,24 @@
-.TH SWAP.CONF 5 "SEPTEMBER 2026" "systemd-swap 0.2.0" swap.conf
+.TH ELASTIC-SWAP.CONF 5 "OCTOBER 2026" "elastic-swap 0.2.0" elastic-swap.conf
 .\" disable french spacing
 .ss 12 0
 .SH NAME
-swap.conf \- systemd-swap configuration files.
+elastic-swap.conf \- elastic-swap configuration files.
 .SH SYNOPSIS
-.IP /etc/systemd/swap.conf.d/*.conf
-.IP /run/systemd/swap.conf.d/*.conf
-.IP /usr/lib/systemd/swap.conf.d/*.conf
-.IP /etc/systemd/swap.conf
-.IP /usr/share/systemd-swap/swap-default.conf
+.IP /etc/elastic-swap/swap.conf.d/*.conf
+.IP /run/elastic-swap/swap.conf.d/*.conf
+.IP /usr/lib/elastic-swap/swap.conf.d/*.conf
+.IP /etc/elastic-swap/swap.conf
+.IP /usr/share/elastic-swap/swap-default.conf
 .SH DESCRIPTION
 .PP
 These configuration files control the zram pool, zswap and the dynamic swap files managed by
-.BR systemd-swap (8).
+.BR elastic-swap (8).
 .SH CONFIGURATION DIRECTORIES AND PRECEDENCE
 .PP
-The default configuration is defined during compilation, so a configuration file is only needed when it is necessary to deviate from those defaults.
-By default, the configuration file in /etc/systemd/ contains commented out entries showing the defaults as a guide to the administrator.
-This file can be edited to create local overrides.
+The defaults ship in /usr/share/elastic-swap/swap-default.conf, which is documentation as much as configuration, so a file in /etc/ is only needed to deviate from them.
+No file is installed in /etc/elastic-swap/; the administrator creates /etc/elastic-swap/swap.conf, or a drop-in, for local overrides.
 .PP
-When packages need to customize the configuration, they can install configuration snippets in /usr/lib/systemd/swap.conf.d/.
+When packages need to customize the configuration, they can install configuration snippets in /usr/lib/elastic-swap/swap.conf.d/.
 The main configuration file is read before any of the configuration directories, and has the lowest precedence; entries in a file in any configuration directory override entries in the single configuration file.
 Files in the swap.conf.d/ configuration subdirectories are sorted by their filename in lexicographic order, regardless of in which of the subdirectories they reside.
 When multiple files specify the same option, for options which accept just a single value, the entry in the file with the lexicographically latest name takes precedence.
@@ -32,18 +31,18 @@ To disable a configuration file supplied by the vendor, the recommended way is t
 .PP
 Sizes accept the suffixes K, M, G and T, or a percentage of RAM where noted.
 In auto mode the daemon injects the values marked "auto" in
-/usr/share/systemd-swap/swap-default.conf; any value set in a configuration
+/usr/share/elastic-swap/swap-default.conf; any value set in a configuration
 file takes precedence.
 .SS Mode
 .IP swap_mode=
+.B zswap+swapfile
+(default) uses zswap in front of swap files that grow and shrink on demand.
 .B auto
-(default) picks zram with swap files when the swap file system is btrfs, ext4
+picks zram with swap files when the swap file system is btrfs, ext4
 or xfs with at least as much free space as RAM, and zram alone otherwise
 (live systems included).
 .B zram+swapfile
 uses a zram pool as primary swap and swap files for overflow.
-.B zswap+swapfile
-uses zswap in front of swap files.
 .B zram
 uses the zram pool only.
 .B manual
@@ -121,7 +120,7 @@ Preallocated files (NOCOW on btrfs) created under memory pressure and removed
 when idle. Their priority is below zram, so the kernel uses them once zram is
 full.
 .IP swapfile_path=
-Directory for the swap files (default /swapfile).
+Directory for the swap files (default /var/swap). \fBelastic-swap prepare\fR creates it as a NOCOW btrfs subvolume. It runs with full privileges and does not read /run/elastic-swap/swap.conf.d, so set this key under /etc or /usr/lib.
 .IP swapfile_chunk_size=
 Size of each file (default 512M).
 .IP swapfile_max_count=
@@ -145,7 +144,14 @@ pages, 20\(en60 (default 40).
 .IP mglru_min_ttl_ms=
 Pages younger than this many milliseconds are not reclaimed (default 1000;
 0 leaves the kernel setting alone). Needs a kernel with MGLRU.
+.SS Kernel tuning
+.IP kernel_tuning=
+yes (default) sets
+.B vm.min_free_kbytes
+to 3% of RAM, capped at 512 MiB, and transparent huge pages to
+.B madvise
+when the daemon starts. no leaves both alone.
 .SH AUTHOR
 Vilgot Fredenberg <vilgot@fredenberg.xyz>
 .SH "SEE ALSO"
-.BR systemd-swap (8)
+.BR elastic-swap (8)

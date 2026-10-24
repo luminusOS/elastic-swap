@@ -1,24 +1,24 @@
-.TH SYSTEMD-SWAP 8 "SEPTEMBER 2026" "systemd-swap 0.2.0" systemd-swap
+.TH ELASTIC-SWAP 8 "OCTOBER 2026" "elastic-swap 0.2.0" elastic-swap
 .\" disable french spacing
 .ss 12 0
 .SH NAME
-systemd-swap \- Dynamic swap management for zram, zswap, and swap files.
+elastic-swap \- Dynamic swap management for zram, zswap, and swap files.
 .SH SYNOPSIS
-.B systemd-swap
+.B elastic-swap
 .RB [ \-\-dry\-run ]
 .RB [ \-h | \-\-help ]
 .RB [ \-V | \-\-version ]
-.I start|status|autoconfig
+.I start|status|autoconfig|prepare
 .SH DESCRIPTION
-systemd-swap is a daemon started by
-.B systemd-swap.service
+elastic-swap is a daemon started by
+.B elastic-swap.service
 at boot. It runs a pool of
 .B zram
 devices that grows as compression saves RAM and shrinks when idle, or
 .B zswap
 in front of disk swap, and creates preallocated swap files when memory runs
 short. The swap mode and its tuning come from
-.BR swap.conf (5);
+.BR elastic-swap.conf (5);
 auto mode picks them from the hardware.
 .SH COMMANDS
 .IP start
@@ -27,18 +27,26 @@ Stopping the service ends the daemon but leaves its swap active, so no page
 has to come back into RAM; the next start adopts that swap, and at shutdown
 systemd deactivates it.
 .IP status
-Print the status of systemd-swap; modules being used and their statuses.
+Print the status of elastic-swap; modules being used and their statuses.
 .IP autoconfig
 Print the recommended configuration for the current system without applying it.
+.IP prepare
+Create the swap file directory (a NOCOW btrfs subvolume on btrfs, a plain
+directory elsewhere). The service unit runs it as
+.B ExecStartPre=+
+so that it escapes the sandbox of the daemon itself. It does nothing in the
+.B zram
+and
+.B disabled
+modes.
 .SH OPTIONS
 .IP \-\-dry\-run
 Show what would be done without mutating system state. No
 .BR modprobe (8),
 .BR swapon (8),
 .BR swapoff (8),
-sysfs writes, or
-.BR fstab (5)
-modifications are performed. Compatible with
+or sysfs writes are performed. elastic-swap never edits
+.BR fstab (5). Compatible with
 .BR start .
 Exits 0 on a successful plan.
 .IP "\-h, \-\-help"
@@ -50,4 +58,4 @@ Vilgot Fredenberg <vilgot@fredenberg.xyz>
 .br
 Oliver Old <oliver.old@outlook.com>
 .SH "SEE ALSO"
-.BR swap.conf (5)
+.BR elastic-swap.conf (5)

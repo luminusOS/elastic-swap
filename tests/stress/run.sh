@@ -31,6 +31,6 @@ awk '{ram = 0; stored = 0
       }
       if (ram > max_ram) max_ram = ram; if (stored > max_stored) max_stored = stored}
      END {printf "zram peak: %d MB stored in %d MB of RAM\n", max_stored, max_ram}' "mon_$name.log"
-journalctl -u systemd-swap --since "$since" --no-pager -o cat \
+journalctl -u elastic-swap --since "$since" --no-pager -o cat \
   | grep -E 'expanding|removed|contracting|WARN|EMERG|pressure|wrote back' \
   | sed -E 's/[0-9]+/N/g' | sort | uniq -c

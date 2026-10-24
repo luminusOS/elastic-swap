@@ -1,4 +1,4 @@
-//! General-purpose utilities for systemd-swap.
+//! General-purpose utilities for elastic-swap.
 //!
 //! Provides config-value lookup helpers, unit conversions, and other
 //! small functions shared across multiple modules.

@@ -1,4 +1,4 @@
-//! Configuration parsing for systemd-swap.
+//! Configuration parsing for elastic-swap.
 //!
 //! Reads key=value config files and expands shell-style `${VAR}` references.
 //! Arithmetic expressions of the form `a OP b` (where OP is +, -, *, /) are
@@ -27,12 +27,19 @@ pub enum ConfigError {
 pub type Result<T> = std::result::Result<T, ConfigError>;
 
 /// Configuration paths
-pub const DEF_CONFIG: &str = "/usr/share/systemd-swap/swap-default.conf";
-pub const ETC_CONFIG: &str = "/etc/systemd/swap.conf";
-pub const VEN_SYSD: &str = "/usr/lib/systemd";
+pub const DEF_CONFIG: &str = "/usr/share/elastic-swap/swap-default.conf";
+pub const ETC_CONFIG: &str = "/etc/elastic-swap/swap.conf";
+pub const CONF_D_PARENTS: [&str; 3] = [
+    "/usr/lib/elastic-swap",
+    "/run/elastic-swap",
+    "/etc/elastic-swap",
+];
+/// The parents an unsandboxed process may trust: the daemon itself can write
+/// /run, so fragments there must not steer anything running with full privileges.
+const PERSISTENT_CONF_D_PARENTS: [&str; 2] = ["/usr/lib/elastic-swap", "/etc/elastic-swap"];
 pub const RUN_SYSD: &str = "/run/systemd";
-pub const ETC_SYSD: &str = "/etc/systemd";
-pub const WORK_DIR: &str = "/run/systemd/swap";
+// Kept apart from /run/elastic-swap/swap.conf.d: start clears this whole tree.
+pub const WORK_DIR: &str = "/run/elastic-swap/state";
 
 /// Configuration holder
 #[derive(Debug, Clone)]
@@ -43,6 +50,16 @@ pub struct Config {
 impl Config {
     /// Load configuration from all sources
     pub fn load() -> Result<Self> {
+        Self::load_from(&CONF_D_PARENTS)
+    }
+
+    /// Load only the configuration that persists on disk, for steps that run
+    /// outside the daemon's sandbox.
+    pub fn load_persistent() -> Result<Self> {
+        Self::load_from(&PERSISTENT_CONF_D_PARENTS)
+    }
+
+    fn load_from(conf_d_parents: &[&str]) -> Result<Self> {
         let mut values = HashMap::new();
 
         // Inject system-derived values without unsafe env::set_var.
@@ -64,7 +81,7 @@ impl Config {
             }
         }
 
-        // Load /etc/systemd/swap.conf
+        // Load /etc/elastic-swap/swap.conf
         if Path::new(ETC_CONFIG).exists() {
             match Self::parse_config(ETC_CONFIG, &system_vars) {
                 Ok(cfg) => values.extend(cfg),
@@ -74,7 +91,7 @@ impl Config {
 
         // Load conf.d fragments (etc > run > lib for same basename)
         let mut config_files: HashMap<String, String> = HashMap::new();
-        for base_path in [VEN_SYSD, RUN_SYSD, ETC_SYSD] {
+        for base_path in conf_d_parents {
             let pattern = format!("{}/swap.conf.d/*.conf", base_path);
             if let Ok(entries) = glob(&pattern) {
                 for entry in entries.flatten() {

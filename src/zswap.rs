@@ -1,4 +1,4 @@
-// Zswap configuration for systemd-swap
+// Zswap configuration for elastic-swap
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 use std::collections::HashMap;

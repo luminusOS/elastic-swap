@@ -1,14 +1,20 @@
 [Unit]
 Description=Manage swap spaces on zram, files and partitions.
-Wants=pre-systemd-swap.service
-After=pre-systemd-swap.service
+Documentation=man:elastic-swap(8) man:elastic-swap.conf(5)
+Wants=modprobe@zram.service
+After=modprobe@zram.service
 # Rate limit for Restart=on-failure below (these two keys live in [Unit]).
 StartLimitIntervalSec=5min
 StartLimitBurst=10
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/systemd-swap start
+# The `+` runs prepare outside this unit's sandbox, which is what lets it turn
+# the swap directory into a btrfs subvolume before ProtectSystem=strict binds it.
+# The `-` keeps a failed prepare from taking down the zram fallback: in the zram
+# modes the daemon carries on without swap files, as it always did.
+ExecStartPre=-+/usr/bin/elastic-swap prepare
+ExecStart=/usr/bin/elastic-swap start
 # No ExecStop=: stopping the service only ends the daemon, by SIGTERM. The swap
 # it set up stays active, because a swapoff has to fit every swapped page back
 # into RAM at once — a restart under load sat in it until TimeoutStopSec.
@@ -59,22 +65,25 @@ ProtectProc=invisible
 #   /sys/block/zram*/{disksize,comp_algorithm,mem_limit,reset,...}  via /sys
 #   /sys/class/zram-control/{hot_add,hot_remove}                     via /sys
 #   /sys/module/zswap/parameters/*                                   via /sys
-#   /run/systemd/swap/                                               runtime state
+#   /proc/sys/vm/min_free_kbytes                                     not sandboxed here
+#   /run/elastic-swap/state/                                         runtime state
 #   /run/systemd/system/                                             generated units
-#   /swapfile/                              swapfiles and zram writeback stores
+#   /var/swap/                              swapfiles and zram writeback stores
 #
 # Every entry must exist when the mount namespace is built, or namespacing
 # fails and the daemon never runs at all: ExecStart is not even reached and the
-# unit exits 226/NAMESPACE. A stale `/var/lib/systemd-swap` sat in this list
-# while nothing in the tree created or used it, and that is exactly what
-# happened — the host booted with no swap and retried forever.
+# unit exits 226/NAMESPACE.
 #
-# Hence the `-` on /swapfile: pre-systemd-swap.service creates it before this
-# unit runs (After= above), but if that one-shot ever fails, `-` degrades the
-# daemon to zram-only instead of taking the whole service down. Kernel paths
-# need no prefix; /sys and /run always exist. /proc/sys/vm is not listed:
-# the daemon writes no sysctl (pre-systemd-swap sets min_free_kbytes in its
-# own unit).
+# Hence the `-` on /var/swap: `prepare` creates it before this unit's namespace
+# is built, but an administrator who points swapfile_path elsewhere, or runs a
+# mode without swap files, must not take the whole service down with a stale
+# entry. Kernel paths need no prefix; /sys and /run always exist.
+#
+# /var/swap cannot be created by tmpfiles.d: its `v` line makes a subvolume only
+# when / itself is one, and the root of an image-based system is not. Inside this
+# namespace the path is a bind mount, and the daemon's fallback for a plain empty
+# directory removes it first, which fails with EBUSY. `prepare` runs unsandboxed
+# and does the creation.
 #
 # Only add a path here that something in this repository actually writes, and
 # keep it in sync with `unit_readwritepaths_are_all_reachable` in
@@ -83,7 +92,7 @@ ProtectProc=invisible
 #
 # /etc is read-only at runtime; configuration is read on start only.
 ProtectSystem=strict
-ReadWritePaths=/sys /run -/swapfile
+ReadWritePaths=/sys /run -/var/swap
 RestrictNamespaces=yes
 RestrictSUIDSGID=yes
 SystemCallArchitectures=native

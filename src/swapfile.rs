@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -110,7 +110,12 @@ pub struct SwapFileConfig {
 /// such as `/etc`, `/sys`, `/proc`, `/dev`, `/bin`, `/sbin`, `/usr`, `/lib`,
 /// `/boot`, and `/run` itself.
 pub(crate) fn validate_swapfile_path(path: &Path) -> bool {
-    if !path.is_absolute() {
+    if !path.is_absolute() || path.components().any(|c| c == Component::ParentDir) {
+        return false;
+    }
+    // `//etc` and `/./usr` name the same directories as `/etc` and `/usr`.
+    let path: PathBuf = path.components().collect();
+    if path == Path::new("/") {
         return false;
     }
     // Exact directories that must never be used as a swap directory
@@ -149,6 +154,7 @@ impl SwapFileConfig {
         if !validate_swapfile_path(&path) {
             return Err(SwapFileError::InvalidPath);
         }
+        let path: PathBuf = path.components().collect();
 
         let chunk_size_str = config
             .get("swapfile_chunk_size")
@@ -242,6 +248,152 @@ pub struct SwapFile {
     disk_full: bool,
 }
 
+/// Resolve symlinks in the part of `path` that exists and append the rest.
+fn resolved_path(path: &Path) -> std::io::Result<PathBuf> {
+    let mut missing = Vec::new();
+    let mut current = path;
+    loop {
+        match fs::canonicalize(current) {
+            Ok(base) => return Ok(missing.iter().rev().fold(base, |p, name| p.join(name))),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                match (current.file_name(), current.parent()) {
+                    (Some(name), Some(parent)) => {
+                        missing.push(name.to_owned());
+                        current = parent;
+                    }
+                    _ => return Err(e),
+                }
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+/// Remove an empty directory that is not a subvolume so one can take its place.
+///
+/// Only `rmdir`, never a recursive delete: `prepare` runs unsandboxed, and a
+/// recursive delete through a path that changes underneath it reaches anywhere.
+/// A mount point (the unit binds the swap directory) answers EBUSY and is kept.
+fn clear_empty_directory(path: &Path) -> Result<()> {
+    if !path.is_dir() {
+        return Err(SwapFileError::Io(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            format!("{} exists and is not a directory", path.display()),
+        )));
+    }
+    match fs::remove_dir(path) {
+        Err(e) if e.raw_os_error() == Some(libc::EBUSY) => {
+            warn!("swapFC: {:?} is a mount point; keeping it", path);
+            Ok(())
+        }
+        other => Ok(other?),
+    }
+}
+
+/// Create the swap directory: a NOCOW btrfs subvolume where possible, a plain
+/// directory elsewhere. Idempotent. Returns whether the path is on btrfs.
+///
+/// Runs unsandboxed from `elastic-swap prepare` before the daemon starts: inside
+/// the unit's namespace the path is a bind mount, which cannot be replaced by a
+/// subvolume. Symlinks are resolved first and the result is validated again, so
+/// a link cannot steer root into a directory the denylist protects.
+pub fn prepare_directory(path: &Path) -> Result<bool> {
+    let resolved = resolved_path(path)?;
+    if !validate_swapfile_path(&resolved) {
+        return Err(SwapFileError::InvalidPath);
+    }
+    let path = resolved.as_path();
+
+    makedirs(path.parent().unwrap_or(Path::new("/")))?;
+
+    let fstype = get_fstype(path);
+    let is_btrfs = fstype.as_deref() == Some("btrfs");
+
+    // Verify supported filesystem
+    match fstype.as_deref() {
+        Some("btrfs") | Some("ext4") | Some("xfs") => {}
+        Some(fs) => {
+            warn!(
+                "swapFC: unsupported filesystem '{}', swap files may not work correctly",
+                fs
+            );
+        }
+        None => {
+            warn!("swapFC: could not detect filesystem type");
+        }
+    }
+
+    // Setup swap directory based on filesystem type
+    if is_btrfs {
+        // For btrfs: create subvolume with nodatacow for swap
+        let is_subvolume = is_btrfs_subvolume(path);
+
+        if !is_subvolume {
+            // Clear the way only when there is nothing to lose. A directory
+            // with entries in it is holding live swap: the swapfiles this
+            // very instance is about to adopt a few lines further on, and
+            // any zram writeback store an administrator pointed here. The
+            // snapshot isolation a subvolume adds is not worth destroying
+            // those for, so an occupied directory is kept as it stands --
+            // `btrfs subvolume create` then fails on it and the fallback
+            // below carries on with a plain directory, NOCOW included.
+            let occupied = path
+                .read_dir()
+                .map(|mut entries| entries.next().is_some())
+                .unwrap_or(false);
+
+            if path.exists() && !occupied {
+                warn!("swapFC: path exists but not a subvolume, removing...");
+                clear_empty_directory(path)?;
+            } else if occupied {
+                warn!(
+                    "swapFC: {:?} holds files and is not a subvolume; keeping it \
+                     (no snapshot isolation)",
+                    path
+                );
+            }
+
+            // Try to create btrfs subvolume
+            let output = Command::new("btrfs")
+                .args(["subvolume", "create"])
+                .arg(path)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .output()?;
+
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                warn!("swapFC: btrfs subvolume create failed: {}", stderr.trim());
+
+                // Fallback: try creating as regular directory
+                info!("swapFC: falling back to regular directory");
+                fs::create_dir_all(path)?;
+
+                info!("swapFC: created directory (non-subvolume) at {:?}", path);
+            } else {
+                info!("swapFC: created btrfs subvolume at {:?}", path);
+            }
+        }
+
+        // NOCOW on the directory, so every file created in it inherits it:
+        // btrfs refuses swapon on a copy-on-write file, and block allocation
+        // during swap writes can deadlock under memory pressure.
+        match Command::new("chattr").args(["+C"]).arg(path).status() {
+            Ok(status) if status.success() => {}
+            Ok(status) => warn!("swapFC: chattr +C {:?} failed with {}", path, status),
+            Err(e) => warn!("swapFC: chattr +C {:?} not run: {}", path, e),
+        }
+    } else {
+        // For ext4/xfs: just create directory
+        if !path.exists() {
+            fs::create_dir_all(path)?;
+            info!("swapFC: created swap directory at {:?}", path);
+        }
+    }
+
+    Ok(is_btrfs)
+}
+
 impl SwapFile {
     /// Create new SwapFC manager
     pub fn new(config: &Config) -> Result<Self> {
@@ -254,107 +406,7 @@ impl SwapFile {
 
         notify_status("Monitoring memory status...");
 
-        // Create parent directories
-        makedirs(swapfile_config.path.parent().unwrap_or(Path::new("/")))?;
-
-        // Detect filesystem type
-        let fstype = get_fstype(&swapfile_config.path);
-        let is_btrfs = fstype.as_deref() == Some("btrfs");
-
-        // Verify supported filesystem
-        match fstype.as_deref() {
-            Some("btrfs") | Some("ext4") | Some("xfs") => {}
-            Some(fs) => {
-                warn!(
-                    "swapFC: unsupported filesystem '{}', swap files may not work correctly",
-                    fs
-                );
-            }
-            None => {
-                warn!("swapFC: could not detect filesystem type");
-            }
-        }
-
-        // Setup swap directory based on filesystem type
-        if is_btrfs {
-            // For btrfs: create subvolume with nodatacow for swap
-            let is_subvolume = is_btrfs_subvolume(&swapfile_config.path);
-
-            if !is_subvolume {
-                // Clear the way only when there is nothing to lose. A directory
-                // with entries in it is holding live swap: the swapfiles this
-                // very instance is about to adopt a few lines further on, and
-                // any zram writeback store an administrator pointed here. The
-                // snapshot isolation a subvolume adds is not worth destroying
-                // those for, so an occupied directory is kept as it stands --
-                // `btrfs subvolume create` then fails on it and the fallback
-                // below carries on with a plain directory, NOCOW included.
-                let occupied = swapfile_config
-                    .path
-                    .read_dir()
-                    .map(|mut entries| entries.next().is_some())
-                    .unwrap_or(false);
-
-                if swapfile_config.path.exists() && !occupied {
-                    warn!("swapFC: path exists but not a subvolume, removing...");
-                    if swapfile_config.path.is_dir() {
-                        fs::remove_dir_all(&swapfile_config.path)?;
-                    } else {
-                        fs::remove_file(&swapfile_config.path)?;
-                    }
-                } else if occupied {
-                    warn!(
-                        "swapFC: {:?} holds files and is not a subvolume; keeping it \
-                         (no snapshot isolation)",
-                        swapfile_config.path
-                    );
-                }
-
-                // Try to create btrfs subvolume
-                let output = Command::new("btrfs")
-                    .args(["subvolume", "create"])
-                    .arg(&swapfile_config.path)
-                    .stdout(Stdio::piped())
-                    .stderr(Stdio::piped())
-                    .output()?;
-
-                if !output.status.success() {
-                    let stderr = String::from_utf8_lossy(&output.stderr);
-                    warn!("swapFC: btrfs subvolume create failed: {}", stderr.trim());
-
-                    // Fallback: try creating as regular directory
-                    info!("swapFC: falling back to regular directory");
-                    fs::create_dir_all(&swapfile_config.path)?;
-
-                    info!(
-                        "swapFC: created directory (non-subvolume) at {:?}",
-                        swapfile_config.path
-                    );
-                } else {
-                    info!(
-                        "swapFC: created btrfs subvolume at {:?}",
-                        swapfile_config.path
-                    );
-                }
-            }
-
-            // NOCOW on the directory, so every file created in it inherits it:
-            // btrfs refuses swapon on a copy-on-write file, and block allocation
-            // during swap writes can deadlock under memory pressure.
-            let _ = Command::new("chattr")
-                .args(["+C"])
-                .arg(&swapfile_config.path)
-                .status();
-        } else {
-            // For ext4/xfs: just create directory
-            if !swapfile_config.path.exists() {
-                fs::create_dir_all(&swapfile_config.path)?;
-                info!(
-                    "swapFC: created swap directory at {:?}",
-                    swapfile_config.path
-                );
-            }
-        }
+        let is_btrfs = prepare_directory(&swapfile_config.path)?;
 
         // Check if ZSWAP is active
         let is_zswap_active = crate::zswap::is_enabled();
@@ -1136,6 +1188,83 @@ mod tests {
     }
 
     // ── validate_swapfile_path ───────────────────────────────────────────────
+
+    #[test]
+    fn validate_rejects_parent_dir_and_unnormalised_system_paths() {
+        for p in [
+            "/var/../etc/swap",
+            "/var/swap/../../proc/x",
+            "//etc/swap",
+            "/./usr/swap",
+            "/etc/./swap",
+            "/",
+            "//",
+        ] {
+            assert!(!validate_swapfile_path(Path::new(p)), "{p} must be refused");
+        }
+        assert!(validate_swapfile_path(Path::new("/var/swap")));
+        assert!(validate_swapfile_path(Path::new("//var//swap")));
+    }
+
+    #[test]
+    fn prepare_creates_the_directory_and_is_idempotent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let target = tmp.path().join("a/b/swap");
+
+        prepare_directory(&target).unwrap();
+        assert!(target.is_dir());
+        prepare_directory(&target).unwrap();
+        assert!(target.is_dir());
+    }
+
+    #[test]
+    fn prepare_keeps_an_occupied_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let target = tmp.path().join("swap");
+        fs::create_dir(&target).unwrap();
+        fs::write(target.join("1"), b"live swap").unwrap();
+
+        prepare_directory(&target).unwrap();
+        assert_eq!(fs::read(target.join("1")).unwrap(), b"live swap");
+    }
+
+    #[test]
+    fn prepare_refuses_a_symlink_into_a_protected_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let link = tmp.path().join("link");
+        std::os::unix::fs::symlink("/etc", &link).unwrap();
+
+        assert!(matches!(
+            prepare_directory(&link.join("elastic-swap-test")),
+            Err(SwapFileError::InvalidPath)
+        ));
+        assert!(!Path::new("/etc/elastic-swap-test").exists());
+    }
+
+    #[test]
+    fn clear_empty_directory_removes_only_an_empty_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        let empty = tmp.path().join("empty");
+        fs::create_dir(&empty).unwrap();
+        clear_empty_directory(&empty).unwrap();
+        assert!(!empty.exists());
+
+        let full = tmp.path().join("full");
+        fs::create_dir_all(full.join("inner")).unwrap();
+        assert!(clear_empty_directory(&full).is_err());
+        assert!(full.join("inner").is_dir());
+    }
+
+    #[test]
+    fn clear_empty_directory_never_deletes_a_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("swap");
+        fs::write(&file, b"data").unwrap();
+
+        assert!(clear_empty_directory(&file).is_err());
+        assert_eq!(fs::read(&file).unwrap(), b"data");
+    }
 
     #[test]
     fn validate_rejects_relative_path() {

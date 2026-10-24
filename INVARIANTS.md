@@ -1,11 +1,10 @@
-# INVARIANTS — biglinux-systemd-swap
+# INVARIANTS — elastic-swap
 
 Living contract. Each invariant: rule → reason → validation.
 
-Scope: single binary `/usr/bin/systemd-swap` (Rust, no workspace).
+Scope: single binary `/usr/bin/elastic-swap` (Rust, no workspace).
 Daemon launched by a systemd unit at boot. Manages a zram pool, zswap and
-swap files dynamically. Replaces the legacy bash `systemd-swap` plus
-`auto-zram-and-swappiness`.
+swap files dynamically.
 
 "Validation" names the check that enforces or evidences the rule today.
 Where no automated test exists yet, it is stated explicitly so an agent does
@@ -48,7 +47,7 @@ not look for one.
   (`systemctl`, `systemd-escape`, `findmnt`, `mkswap`, `btrfs`, `chattr`,
   `swapon`, `du`) build their own `Command` the same way — the full list is
   ARCHITECTURE.md §5. `Command::new("sh"|"bash")` is forbidden in production
-  Rust (the `src/pre-systemd-swap` bash helper is shell by design).
+  Rust (no shell script ships in this package).
 - Reason: paths and device names come from system detection; the rule
   prevents injection in any future regression.
 - Validation: `! grep -RnE 'Command::new\("(sh|bash)"\)' src/`.
@@ -65,14 +64,15 @@ not look for one.
 
 ## H3 — fstab integrity
 
-### H3.1 — Edits to `/etc/fstab` are atomic (write tmp + `sync` + `rename`)
+### H3.1 — elastic-swap never writes `/etc/fstab`
 
-- Rule: the bash helper `src/pre-systemd-swap` writes a temp file, `sync`s,
-  then `rename`s into `/etc/fstab`. Append is idempotent.
-- Reason: power loss during boot is the common scenario; a corrupt fstab
-  blocks the next boot.
-- Validation: `tests/fstab_idempotent.bats` covers double append,
-  pre-existing lines and idempotency of repeated invocation.
+- Rule: no code path opens `/etc/fstab` for writing. Swap is activated with
+  `swapon` and described to systemd by generated `.swap` units in
+  `/run/systemd/system`.
+- Reason: a corrupt fstab blocks the next boot, and the root of an image-based
+  system is read-only anyway. This replaces the atomic-append rule of the
+  fork's bash helper, which is gone.
+- Validation: `! grep -Rn 'fstab' src/ | grep -v '//'` finds no write.
 
 ## H4 — MGLRU tuning
 
@@ -91,27 +91,29 @@ not look for one.
 
 ### H5.1 — systemd unit with `SystemCallFilter=@system-service @swap @mount`
 
-- Rule: `include/systemd-swap.service` declares
+- Rule: `include/elastic-swap.service` declares
   `SystemCallFilter=@system-service @swap @mount`, `NoNewPrivileges=yes`,
   `ProtectSystem=strict`, `ProtectHome=read-only`,
   `CapabilityBoundingSet=CAP_SYS_ADMIN`.
 - Reason: the daemon runs as root; a minimal sandbox reduces blast radius
   if a bug exists.
 - Validation: `grep -E 'SystemCallFilter|NoNewPrivileges|ProtectSystem'
-  include/systemd-swap.service` lists the three.
+  include/elastic-swap.service` lists the three.
 
-### H5.2 — `pre-systemd-swap.service` is `Type=oneshot`; the daemon is `Type=simple`
+### H5.2 — `prepare` runs unsandboxed before the daemon; the daemon is `Type=simple`
 
-- Rule: the bash one-shot unit exits after the initial `swapoff` + fstab
-  edit + sysctl write (`RemainAfterExit=no`). The main daemon
-  `include/systemd-swap.service` is `Type=simple` with `RemainAfterExit=yes`.
-- Reason: separates the mutating one-shot phase from the persistent daemon
-  phase.
+- Rule: `include/elastic-swap.service` runs `ExecStartPre=-+/usr/bin/elastic-swap
+  prepare` and then `ExecStart=… start`, `Type=simple` with
+  `RemainAfterExit=yes`. `prepare` only creates the swap directory.
+- Reason: under `ProtectSystem=strict` the swap directory is a bind mount and
+  cannot be replaced by a btrfs subvolume, so that step has to happen before
+  the namespace is built. Everything else stays sandboxed.
+- Validation: `tests/boundaries.rs::unit_prepares_swap_directory_before_the_daemon_starts`.
 - Note: because the daemon is `Type=simple`, systemd ignores `READY=1`. The
   `sd-notify` calls in `src/main.rs` (`notify_ready`, status updates) are
   advisory only — useful for logs and a future `Type=notify` switch, not a
   readiness handshake today. Code and unit agree on `Type=simple`.
-- Validation: `grep -E 'Type=oneshot|Type=simple' include/*.service`.
+- Validation: `grep -E 'Type=|ExecStart' include/elastic-swap.service`.
 
 ## H6 — Config parser safety
 
@@ -122,7 +124,7 @@ not look for one.
   `evaluate_simple_arithmetic` (integer `+ - * /` only). The config string
   is never passed to `sh -c`. Command substitution `$( … )` (no double
   paren) is not interpreted at all — it is left as-is, never executed.
-- Reason: `/etc/systemd/swap.conf` is root-owned, but a parser bug could
+- Reason: `/etc/elastic-swap/swap.conf` is root-owned, but a parser bug could
   otherwise escalate into command injection via include drop-ins.
 - Validation: `src/config.rs` `#[cfg(test)]` covers the arithmetic
   evaluator; `tests/behavior.rs` exercises
@@ -146,7 +148,7 @@ not look for one.
   the 3.7 GB notebook: a restart under load sat in swapoff until
   `TimeoutStopSec` killed it, and the still-running daemon created files #4
   and #5 while #1–#3 were being removed.
-- Validation: on a test machine, `systemctl restart systemd-swap` with two
+- Validation: on a test machine, `systemctl restart elastic-swap` with two
   zram devices and two swap files active keeps `swapon --show` unchanged,
   logs no swapoff, and the new instance reports the devices as adopted. No
   automated test: it needs systemd and root. The stop is bounded by the

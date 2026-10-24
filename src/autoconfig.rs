@@ -1,4 +1,4 @@
-// Automatic system detection and configuration for systemd-swap
+// Automatic system detection and configuration for elastic-swap
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 use std::path::Path;
@@ -20,7 +20,7 @@ pub struct SystemCapabilities {
 impl SystemCapabilities {
     /// Detect system capabilities
     pub fn detect() -> Self {
-        let swap_path = "/swapfile";
+        let swap_path = defaults::SWAPFILE_PATH;
         let swap_path_fstype = get_fstype(swap_path).or_else(|| get_fstype("/"));
         let total_ram = get_ram_size().unwrap_or(0);
         let free_space = Self::get_free_disk_space(swap_path).unwrap_or(0);
