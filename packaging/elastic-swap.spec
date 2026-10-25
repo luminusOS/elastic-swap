@@ -1,5 +1,5 @@
 Name:           elastic-swap
-Version:        0.2.1
+Version:        0.2.2
 Release:        1%{?dist}
 Summary:        Dynamic swap management for zram, zswap and swap files
 # MIT and BSD-3-Clause come from the statically linked crates (see LICENSE.dependencies).
@@ -69,12 +69,20 @@ cargo test --release --locked --offline
 %doc README.md ARCHITECTURE.md INVARIANTS.md AUTHORS
 %{_bindir}/elastic-swap
 %{_unitdir}/elastic-swap.service
+%{_unitdir}/elastic-swap-prepare.service
 %{_prefix}/lib/sysctl.d/60-elastic-swap.conf
 %{_datadir}/elastic-swap/
 %{_mandir}/man5/elastic-swap.conf.5*
 %{_mandir}/man8/elastic-swap.8*
 
 %changelog
+* Sat Oct 24 2026 LuminusOS <noreply@luminusos.invalid> - 0.2.2-1
+- Create the swap directory from elastic-swap-prepare.service. systemd bind
+  mounts ReadWritePaths= for every command of a unit, "+" prefix included, so
+  the old ExecStartPre could never replace /var/swap with a btrfs subvolume
+- Keep the swap directory when it cannot be replaced (EBUSY or EROFS) instead
+  of stopping the daemon
+
 * Sat Oct 24 2026 LuminusOS <noreply@luminusos.invalid> - 0.2.1-1
 - Fix a failed first swap activation leaving the daemon running with no swap
 - Keep the daemon out of systemd-oomd's reach (ManagedOOMPreference=omit)

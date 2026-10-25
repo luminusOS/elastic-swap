@@ -100,15 +100,18 @@ not look for one.
 - Validation: `grep -E 'SystemCallFilter|NoNewPrivileges|ProtectSystem'
   include/elastic-swap.service` lists the three.
 
-### H5.2 — `prepare` runs unsandboxed before the daemon; the daemon is `Type=simple`
+### H5.2 — `prepare` runs in its own unit, before the daemon; the daemon is `Type=simple`
 
-- Rule: `include/elastic-swap.service` runs `ExecStartPre=-+/usr/bin/elastic-swap
-  prepare` and then `ExecStart=… start`, `Type=simple` with
-  `RemainAfterExit=yes`. `prepare` only creates the swap directory.
-- Reason: under `ProtectSystem=strict` the swap directory is a bind mount and
-  cannot be replaced by a btrfs subvolume, so that step has to happen before
-  the namespace is built. Everything else stays sandboxed.
-- Validation: `tests/boundaries.rs::unit_prepares_swap_directory_before_the_daemon_starts`.
+- Rule: `include/elastic-swap-prepare.service` (`Type=oneshot`) runs
+  `elastic-swap prepare` and sets no mount namespace option that names the swap
+  directory. `include/elastic-swap.service` has `Wants=` and `After=` on it and
+  no `ExecStartPre=`; it is `Type=simple` with `RemainAfterExit=yes`.
+- Reason: systemd bind mounts every `ReadWritePaths=` entry for every command of
+  a unit, `+` prefix included. In the daemon's unit the swap directory is
+  therefore a mount point, which cannot be replaced by a btrfs subvolume
+  (`EBUSY`, or `EROFS` below the read-only `/var`). Only a unit without that
+  sandbox can create the subvolume. Everything else stays sandboxed.
+- Validation: `tests/boundaries.rs::swap_directory_is_prepared_by_a_unit_with_no_mount_sandbox`.
 - Note: because the daemon is `Type=simple`, systemd ignores `READY=1`. The
   `sd-notify` calls in `src/main.rs` (`notify_ready`, status updates) are
   advisory only — useful for logs and a future `Type=notify` switch, not a

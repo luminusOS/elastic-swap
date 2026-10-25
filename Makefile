@@ -20,6 +20,7 @@ CARGO_FLAGS ?= --release --locked
 
 BIN_T := $(DESTDIR)$(bindir)/elastic-swap
 SVC_T := $(DESTDIR)$(libdir)/systemd/system/elastic-swap.service
+PREP_SVC_T := $(DESTDIR)$(libdir)/systemd/system/elastic-swap-prepare.service
 DFL_T := $(DESTDIR)$(datadir)/elastic-swap/swap-default.conf
 MAN5_T := $(DESTDIR)$(mandir)/man5/elastic-swap.conf.5
 MAN8_T := $(DESTDIR)$(mandir)/man8/elastic-swap.8
@@ -39,6 +40,9 @@ $(BIN_T): target/release/elastic-swap
 $(SVC_T): include/elastic-swap.service
 	install -p -Dm644 $< $@
 
+$(PREP_SVC_T): include/elastic-swap-prepare.service
+	install -p -Dm644 $< $@
+
 $(DFL_T): include/swap-default.conf
 	install -p -Dm644 $< $@
 
@@ -53,7 +57,7 @@ $(SYSCTL_T): include/elastic-swap-sysctl.conf
 
 target/release/elastic-swap: build
 
-files: $(BIN_T) $(SVC_T) $(DFL_T) $(MAN5_T) $(MAN8_T) $(SYSCTL_T)
+files: $(BIN_T) $(SVC_T) $(PREP_SVC_T) $(DFL_T) $(MAN5_T) $(MAN8_T) $(SYSCTL_T)
 
 install: ## Install elastic-swap
 install: build files
@@ -61,7 +65,7 @@ install: build files
 uninstall: ## Delete elastic-swap (stop elastic-swap first)
 uninstall:
 	! systemctl is-active --quiet elastic-swap.service
-	rm -v $(BIN_T) $(SVC_T) $(DFL_T) $(MAN5_T) $(MAN8_T) $(SYSCTL_T)
+	rm -v $(BIN_T) $(SVC_T) $(PREP_SVC_T) $(DFL_T) $(MAN5_T) $(MAN8_T) $(SYSCTL_T)
 	rmdir -v $(DESTDIR)$(datadir)/elastic-swap
 
 clean: ## Remove build output

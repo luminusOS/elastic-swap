@@ -61,21 +61,46 @@ fn unit_does_not_narrow_device_policy() {
     );
 }
 
-// `prepare` has to run unsandboxed (`+`) and before the daemon: inside the
-// namespace the swap directory is a bind mount and cannot become a subvolume.
+// systemd bind mounts every ReadWritePaths= entry for every command of a unit,
+// "+" prefix included, and a mount point cannot be replaced by a btrfs subvolume.
+// So the step that creates the subvolume lives in its own unit, which must carry
+// no sandbox option that names the swap directory, and the daemon starts after it.
 #[test]
-fn unit_prepares_swap_directory_before_the_daemon_starts() {
-    let unit = include_str!("../include/elastic-swap.service");
-    let position = |needle: &str| {
+fn swap_directory_is_prepared_by_a_unit_with_no_mount_sandbox() {
+    let daemon = include_str!("../include/elastic-swap.service");
+    let prepare = include_str!("../include/elastic-swap-prepare.service");
+    let line = |unit: &str, key: &str| {
         unit.lines()
-            .position(|l| l == needle)
-            .unwrap_or_else(|| panic!("{needle} missing from elastic-swap.service"))
+            .find_map(|l| l.strip_prefix(key))
+            .unwrap_or_default()
+            .to_string()
     };
 
-    assert!(
-        position("ExecStartPre=-+/usr/bin/elastic-swap prepare")
-            < position("ExecStart=/usr/bin/elastic-swap start")
-    );
+    for key in ["Wants=", "After="] {
+        assert!(
+            line(daemon, key)
+                .split_whitespace()
+                .any(|u| u == "elastic-swap-prepare.service"),
+            "{key} of elastic-swap.service must name the prepare unit"
+        );
+    }
+    assert!(!daemon.lines().any(|l| l.starts_with("ExecStartPre=")));
+    assert_eq!(line(prepare, "ExecStart="), "/usr/bin/elastic-swap prepare");
+    assert_eq!(line(prepare, "Type="), "oneshot");
+    for forbidden in [
+        "ReadWritePaths=",
+        "ReadOnlyPaths=",
+        "InaccessiblePaths=",
+        "BindPaths=",
+        "ProtectSystem=",
+        "ProtectHome=",
+        "TemporaryFileSystem=",
+    ] {
+        assert!(
+            !prepare.lines().any(|l| l.starts_with(forbidden)),
+            "elastic-swap-prepare.service must not set {forbidden}"
+        );
+    }
 }
 
 #[test]

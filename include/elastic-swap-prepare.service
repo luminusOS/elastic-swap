@@ -1,0 +1,24 @@
+[Unit]
+Description=Create the swap directory for elastic-swap
+Documentation=man:elastic-swap(8)
+Before=elastic-swap.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/elastic-swap prepare
+# This unit must not set ProtectSystem=, ReadWritePaths= or any other mount
+# namespace option that names /var/swap. systemd applies ReadWritePaths= to every
+# command of a unit, "+" prefix or not, by bind mounting the path onto itself. The
+# directory is then a mount point and cannot be replaced by a btrfs subvolume,
+# which is the one thing this unit exists to do. The daemon unit keeps its sandbox.
+NoNewPrivileges=yes
+PrivateNetwork=yes
+PrivateTmp=yes
+ProtectControlGroups=yes
+ProtectKernelModules=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+StandardOutput=journal
+StandardError=journal

@@ -269,11 +269,20 @@ fn resolved_path(path: &Path) -> std::io::Result<PathBuf> {
     }
 }
 
+/// Whether `rmdir` failed because the directory cannot be replaced from here.
+///
+/// A mount point answers EBUSY. Inside the daemon's sandbox the swap directory is
+/// a bind mount below a read-only /var, and there the kernel answers EROFS before
+/// it ever looks at the mount point. Either way the directory is usable as it is.
+fn directory_is_pinned(e: &std::io::Error) -> bool {
+    matches!(e.raw_os_error(), Some(libc::EBUSY | libc::EROFS))
+}
+
 /// Remove an empty directory that is not a subvolume so one can take its place.
 ///
-/// Only `rmdir`, never a recursive delete: `prepare` runs unsandboxed, and a
-/// recursive delete through a path that changes underneath it reaches anywhere.
-/// A mount point (the unit binds the swap directory) answers EBUSY and is kept.
+/// Only `rmdir`, never a recursive delete: `prepare` runs with full privileges,
+/// and a recursive delete through a path that changes underneath it reaches
+/// anywhere. A directory that is pinned in place is kept.
 fn clear_empty_directory(path: &Path) -> Result<()> {
     if !path.is_dir() {
         return Err(SwapFileError::Io(std::io::Error::new(
@@ -282,8 +291,11 @@ fn clear_empty_directory(path: &Path) -> Result<()> {
         )));
     }
     match fs::remove_dir(path) {
-        Err(e) if e.raw_os_error() == Some(libc::EBUSY) => {
-            warn!("swapFC: {:?} is a mount point; keeping it", path);
+        Err(e) if directory_is_pinned(&e) => {
+            warn!(
+                "swapFC: {:?} cannot be replaced here ({}); keeping the directory",
+                path, e
+            );
             Ok(())
         }
         other => Ok(other?),
@@ -1524,5 +1536,17 @@ mod tests {
 
         assert!(swap.create_swapfile(512 * MB).is_err());
         assert_eq!(swap.allocated, 0);
+    }
+
+    #[test]
+    fn a_pinned_directory_is_kept_not_an_error() {
+        for errno in [libc::EBUSY, libc::EROFS] {
+            let e = std::io::Error::from_raw_os_error(errno);
+            assert!(directory_is_pinned(&e), "errno {errno}");
+        }
+        for errno in [libc::EACCES, libc::ENOTEMPTY, libc::ENOENT] {
+            let e = std::io::Error::from_raw_os_error(errno);
+            assert!(!directory_is_pinned(&e), "errno {errno}");
+        }
     }
 }

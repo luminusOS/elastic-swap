@@ -29,7 +29,7 @@ Single binary + library crate (`Cargo.toml`). One member, no workspace.
 | `src/zswap.rs`               | Sysfs writes to `/sys/module/zswap/parameters/*`, backup/restore of pre-existing settings.      |
 | `src/swapfile.rs`            | swapfc engine: btrfs subvol+NOCOW, preallocated files (`fallocate` on btrfs), `mkswap`/`swapon` cycle. |
 | `src/tuning.rs`              | `vm.min_free_kbytes` (3% of RAM, max 512 MiB) and THP `madvise`, written once at start.         |
-| `include/elastic-swap.service` | systemd unit; `ExecStartPre=+ elastic-swap prepare` runs outside the sandbox.                 |
+| `include/elastic-swap*.service` | `elastic-swap.service` (the daemon) and `elastic-swap-prepare.service` (creates `/var/swap`).  |
 | `include/swap-default.conf`  | Shipped defaults, installed to `/usr/share/elastic-swap`; nothing is installed to `/etc`.       |
 | `man/*`                      | `elastic-swap.conf(5)` and `elastic-swap(8)` man pages.                                                 |
 | `tests/*.rs`, `tests/stress/` | Unit/integration/CLI/boundaries; manual stress scripts (see §7).                               |
@@ -172,7 +172,7 @@ check `elastic_swap::is_dry_run()` as a second guard; the rest do not.
   `DeviceAllow=` — one entry promotes `DevicePolicy=auto` to `strict`, and the
   zram/loop nodes the daemon hot-adds at runtime cannot be allowlisted ahead
   of time (a `block-loop` entry once denied `/dev/zram*` and killed the pool).
-- `elastic-swap prepare` is the only step that runs unsandboxed (`ExecStartPre=+`):
+- `elastic-swap prepare` is the only step that runs without the sandbox, in `elastic-swap-prepare.service`:
   it makes `/var/swap` a NOCOW btrfs subvolume, which the daemon cannot do from
   inside its own namespace, where the path is a bind mount.
 - elastic-swap *never* writes `/etc/fstab`; swap is managed through transient

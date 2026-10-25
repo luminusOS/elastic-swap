@@ -1,19 +1,14 @@
 [Unit]
 Description=Manage swap spaces on zram, files and partitions.
 Documentation=man:elastic-swap(8) man:elastic-swap.conf(5)
-Wants=modprobe@zram.service
-After=modprobe@zram.service
+Wants=modprobe@zram.service elastic-swap-prepare.service
+After=modprobe@zram.service elastic-swap-prepare.service
 # Rate limit for Restart=on-failure below (these two keys live in [Unit]).
 StartLimitIntervalSec=5min
 StartLimitBurst=10
 
 [Service]
 Type=simple
-# The `+` runs prepare outside this unit's sandbox, which is what lets it turn
-# the swap directory into a btrfs subvolume before ProtectSystem=strict binds it.
-# The `-` keeps a failed prepare from taking down the zram fallback: in the zram
-# modes the daemon carries on without swap files, as it always did.
-ExecStartPre=-+/usr/bin/elastic-swap prepare
 ExecStart=/usr/bin/elastic-swap start
 # No ExecStop=: stopping the service only ends the daemon, by SIGTERM. The swap
 # it set up stays active, because a swapoff has to fit every swapped page back
@@ -78,16 +73,18 @@ ProtectProc=invisible
 # fails and the daemon never runs at all: ExecStart is not even reached and the
 # unit exits 226/NAMESPACE.
 #
-# Hence the `-` on /var/swap: `prepare` creates it before this unit's namespace
-# is built, but an administrator who points swapfile_path elsewhere, or runs a
-# mode without swap files, must not take the whole service down with a stale
-# entry. Kernel paths need no prefix; /sys and /run always exist.
+# Hence the `-` on /var/swap: elastic-swap-prepare.service creates it first (see
+# Wants= and After= above), but an administrator who points swapfile_path elsewhere,
+# or runs a mode without swap files, must not take the whole service down with a
+# stale entry. Kernel paths need no prefix; /sys and /run always exist.
 #
 # /var/swap cannot be created by tmpfiles.d: its `v` line makes a subvolume only
-# when / itself is one, and the root of an image-based system is not. Inside this
-# namespace the path is a bind mount, and the daemon's fallback for a plain empty
-# directory removes it first, which fails with EBUSY. `prepare` runs unsandboxed
-# and does the creation.
+# when / itself is one, and the root of an image-based system is not. It cannot be
+# created by an ExecStartPre= of this unit either: ReadWritePaths= bind mounts the
+# path for every command of the unit, "+" prefix included, and a mount point cannot
+# be replaced by a subvolume. So a separate unit does it, with no such sandbox.
+# Inside this namespace the path is a bind mount below a read-only /var, so removing
+# it fails with EROFS (or EBUSY); the daemon keeps the directory it finds.
 #
 # Only add a path here that something in this repository actually writes, and
 # keep it in sync with `unit_readwritepaths_are_all_reachable` in
