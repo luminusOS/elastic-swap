@@ -91,6 +91,13 @@ fn main() {
     }
 }
 
+/// The directory swap files go to, as configured or by default.
+fn configured_swap_path(config: &Config) -> &str {
+    config
+        .get_opt("swapfile_path")
+        .unwrap_or(defaults::SWAPFILE_PATH)
+}
+
 /// Parse swap_mode from config
 fn get_swap_mode(config: &Config) -> SwapMode {
     match config
@@ -213,10 +220,10 @@ fn configure_mglru(config: &Config) {
 fn dry_run_plan() -> Result<(), Box<dyn std::error::Error>> {
     println!("[dry-run] no system state will be modified");
 
-    let caps = SystemCapabilities::detect();
+    let config = Config::load()?;
+    let caps = SystemCapabilities::detect(configured_swap_path(&config));
     let recommended = RecommendedConfig::from_capabilities(&caps);
 
-    let config = Config::load()?;
     let swap_mode = get_swap_mode(&config);
 
     let effective_mode = match swap_mode {
@@ -292,8 +299,10 @@ fn prepare() -> Result<(), Box<dyn std::error::Error>> {
 fn start() -> Result<(), Box<dyn std::error::Error>> {
     am_i_root()?;
 
+    let mut config = Config::load()?;
+
     // Detect system capabilities for autoconfig
-    let caps = SystemCapabilities::detect();
+    let caps = SystemCapabilities::detect(configured_swap_path(&config));
     let recommended = RecommendedConfig::from_capabilities(&caps);
 
     // Clean up after any previous instance
@@ -310,7 +319,6 @@ fn start() -> Result<(), Box<dyn std::error::Error>> {
         elastic_swap::config::RUN_SYSD
     ))?;
 
-    let mut config = Config::load()?;
     let swap_mode = get_swap_mode(&config);
 
     // Register signal handlers once, before entering any mode
@@ -777,7 +785,8 @@ fn status() -> Result<(), Box<dyn std::error::Error>> {
 fn autoconfig() -> Result<(), Box<dyn std::error::Error>> {
     println!("Detecting system capabilities...\n");
 
-    let caps = SystemCapabilities::detect();
+    let config = Config::load()?;
+    let caps = SystemCapabilities::detect(configured_swap_path(&config));
     let recommended = RecommendedConfig::from_capabilities(&caps);
 
     println!("=== System Information ===");

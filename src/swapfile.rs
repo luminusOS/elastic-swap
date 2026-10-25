@@ -847,9 +847,15 @@ impl SwapFile {
                         swap_total / MB,
                         size / MB
                     );
-                    if self.create_swapfile(size).is_ok() {
-                        self.last_creation = Some(Instant::now());
-                        self.cooldown_secs = 30;
+                    match self.create_swapfile(size) {
+                        Ok(()) => {
+                            self.last_creation = Some(Instant::now());
+                            self.cooldown_secs = 30;
+                        }
+                        Err(e) => {
+                            warn!("swapFC: expansion failed: {}", e);
+                            self.last_creation = Some(Instant::now());
+                        }
                     }
                     continue;
                 }
@@ -868,9 +874,15 @@ impl SwapFile {
                         "swapFC: all {} file(s) >= 85% full, disk_free={}% - expanding (stress trigger)",
                         swap_files.len(), disk_free_percent
                     );
-                    if self.create_swapfile(self.config.chunk_size).is_ok() {
-                        self.last_creation = Some(Instant::now());
-                        self.cooldown_secs = 30;
+                    match self.create_swapfile(self.config.chunk_size) {
+                        Ok(()) => {
+                            self.last_creation = Some(Instant::now());
+                            self.cooldown_secs = 30;
+                        }
+                        Err(e) => {
+                            warn!("swapFC: expansion failed: {}", e);
+                            self.last_creation = Some(Instant::now());
+                        }
                     }
                     continue;
                 }
@@ -881,9 +893,15 @@ impl SwapFile {
                         "swapFC: disk swap pressure! disk_free={}% < {}% (thresh) - expanding (cooldown={}s)",
                         disk_free_percent, swap_threshold, self.cooldown_secs
                     );
-                    if self.create_swapfile(self.config.chunk_size).is_ok() {
-                        self.last_creation = Some(Instant::now());
-                        self.cooldown_secs = (self.cooldown_secs * 2).min(120);
+                    match self.create_swapfile(self.config.chunk_size) {
+                        Ok(()) => {
+                            self.last_creation = Some(Instant::now());
+                            self.cooldown_secs = (self.cooldown_secs * 2).min(120);
+                        }
+                        Err(e) => {
+                            warn!("swapFC: expansion failed: {}", e);
+                            self.last_creation = Some(Instant::now());
+                        }
                     }
                     continue;
                 }
@@ -1005,23 +1023,29 @@ impl SwapFile {
         // Remove if exists
         force_remove(&swapfile_path, false);
 
-        // One cleanup for every failure: a partial file would hold disk space
-        // and the counters would name a swap file that does not exist.
         info!(
             "swapFC: creating preallocated file #{} ({}MB)",
             index,
             chunk_size / MB
         );
-        if let Err(e) = self.allocate_file(&swapfile_path, chunk_size) {
-            {
-                force_remove(&swapfile_path, false);
-                self.allocated -= 1;
-                return Err(e);
-            }
-        }
-        let swapfile = swapfile_path.to_string_lossy().to_string();
+        let result = self.provision_swapfile(&swapfile_path, index, chunk_size);
+        let active = result.is_err()
+            && self
+                .get_swapfiles_info()
+                .iter()
+                .any(|f| f.path == swapfile_path);
+        self.settle_creation(&swapfile_path, result, active)?;
 
-        // mkswap
+        notify_status("Monitoring memory status...");
+        Ok(())
+    }
+
+    /// Allocate, format and activate one swap file. Any error may leave a
+    /// partial file or a half-activated one behind; `settle_creation` decides.
+    fn provision_swapfile(&self, path: &Path, index: u32, chunk_size: u64) -> Result<()> {
+        self.allocate_file(path, chunk_size)?;
+        let swapfile = path.to_string_lossy().to_string();
+
         let fs_label = format!("SWAP_btrfs_{}", index);
         let status = Command::new("mkswap")
             .args(["-L", &fs_label])
@@ -1029,8 +1053,6 @@ impl SwapFile {
             .stdout(Stdio::null())
             .status()?;
         if !status.success() {
-            force_remove(&swapfile_path, false);
-            self.allocated -= 1;
             return Err(SwapFileError::Io(std::io::Error::other("mkswap failed")));
         }
 
@@ -1040,11 +1062,33 @@ impl SwapFile {
             None,
             &format!("swapfile_{}", index),
         )?;
-
         activate_swap(&swapfile, None, false, &unit_name)?;
-
-        notify_status("Monitoring memory status...");
         Ok(())
+    }
+
+    /// Reconcile the file count with what `provision_swapfile` achieved.
+    ///
+    /// A failure after `swapon` leaves the file in use, so it stays counted:
+    /// only systemd's view of it is missing. Any other failure removes the
+    /// partial file and gives the slot back. Leaking the slot used to leave the
+    /// daemon running with no swap and a count that said otherwise, which hid
+    /// the failure from `create_initial_swap`.
+    fn settle_creation(&mut self, path: &Path, result: Result<()>, active: bool) -> Result<()> {
+        match result {
+            Ok(()) => Ok(()),
+            Err(e) if active => {
+                warn!(
+                    "swapFC: {:?} is swapping, but its unit could not be set up: {}",
+                    path, e
+                );
+                Ok(())
+            }
+            Err(e) => {
+                force_remove(path, false);
+                self.allocated = self.allocated.saturating_sub(1);
+                Err(e)
+            }
+        }
     }
 
     /// Create `swapfile_path` and reserve `chunk_size` bytes for it. The caller
@@ -1404,5 +1448,81 @@ mod tests {
         let c = cfg(&[("swapfile_path", "/swap/")]);
         let sc = SwapFileConfig::from_config(&c).unwrap();
         assert_eq!(sc.path, PathBuf::from("/swap"));
+    }
+
+    fn swapfile_in(dir: &Path) -> SwapFile {
+        let config = Config::from_pairs_for_tests([("swapfile_path", dir.to_str().unwrap())]);
+        SwapFile {
+            config: SwapFileConfig::from_config(&config).unwrap(),
+            allocated: 1,
+            is_btrfs: false,
+            last_creation: None,
+            cooldown_secs: 15,
+            prev_free_swap: 100,
+            is_zswap_active: true,
+            disk_full: false,
+        }
+    }
+
+    #[test]
+    fn failed_creation_removes_the_partial_file_and_frees_the_slot() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("1");
+        fs::write(&file, b"partial").unwrap();
+        let mut swap = swapfile_in(tmp.path());
+
+        let failure = Err(SwapFileError::Io(std::io::Error::other("unit failed")));
+        assert!(swap.settle_creation(&file, failure, false).is_err());
+
+        assert_eq!(swap.allocated, 0);
+        assert!(!file.exists());
+    }
+
+    #[test]
+    fn creation_that_reached_swapon_keeps_the_file_and_the_count() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("1");
+        fs::write(&file, b"in use").unwrap();
+        let mut swap = swapfile_in(tmp.path());
+
+        let failure = Err(SwapFileError::Io(std::io::Error::other("daemon-reload")));
+        assert!(swap.settle_creation(&file, failure, true).is_ok());
+
+        assert_eq!(swap.allocated, 1);
+        assert!(file.exists());
+    }
+
+    #[test]
+    fn successful_creation_changes_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("1");
+        fs::write(&file, b"ok").unwrap();
+        let mut swap = swapfile_in(tmp.path());
+
+        assert!(swap.settle_creation(&file, Ok(()), false).is_ok());
+        assert_eq!(swap.allocated, 1);
+        assert!(file.exists());
+    }
+
+    #[test]
+    fn freeing_a_slot_never_underflows() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut swap = swapfile_in(tmp.path());
+        swap.allocated = 0;
+
+        let failure = Err(SwapFileError::NoSpace);
+        let _ = swap.settle_creation(&tmp.path().join("1"), failure, false);
+        assert_eq!(swap.allocated, 0);
+    }
+
+    #[test]
+    fn create_swapfile_gives_the_slot_back_when_provisioning_fails() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir(tmp.path().join("1")).unwrap();
+        let mut swap = swapfile_in(tmp.path());
+        swap.allocated = 0;
+
+        assert!(swap.create_swapfile(512 * MB).is_err());
+        assert_eq!(swap.allocated, 0);
     }
 }

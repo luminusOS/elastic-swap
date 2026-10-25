@@ -45,7 +45,7 @@ Swap files are the overflow of every mode except `zram`.
 - Priority: negative, below zram, so the kernel uses them only when zram is full.
 - NOCOW: enabled on btrfs, which prevents a deadlock under memory pressure.
 - Created when: the free space in the files drops under 40%, every file is at least 85% full, or free RAM is at most 20% while total free swap is under 15%. The last rule acts ahead of systemd-oomd's default 90% swap limit.
-- Removed when: the free space in the files rises over 70% and free RAM is over 20%.
+- Removed when: the free space in the files rises over 70% and free RAM is over 20%. In `zswap+swapfile` mode the daemon is more careful, because the files are write-back targets: it needs more than 85% free (the setting is ignored), more than two unused files, and 300 seconds since the last file this run created.
 
 ## Zram pool
 
@@ -82,6 +82,7 @@ Swap file monitor (every second while files exist):
   files' free space < 40%                        -> create a 512 MB swap file
   free RAM <= 20% and total free swap < 15%      -> create a headroom file now
   files' free space > 70% and free RAM > 20%     -> remove an idle file
+                                                    (zswap mode: > 85% free, > 2 unused files, 300 s)
 
 Zram pool monitor (every 5 seconds):
   utilization > 85%                   -> add a zram device (up to 8)

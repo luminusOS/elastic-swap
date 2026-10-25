@@ -20,7 +20,7 @@ See [how it works](docs/how-it-works.md) for the thresholds and the zram pool.
 On Fedora 45 (x86_64), install the RPM from the [latest release](https://github.com/luminusOS/elastic-swap/releases/latest):
 
 ```bash
-sudo dnf install https://github.com/luminusOS/elastic-swap/releases/download/v0.2.0/elastic-swap-0.2.0-1.fc45.x86_64.rpm
+sudo dnf install https://github.com/luminusOS/elastic-swap/releases/download/v0.2.1/elastic-swap-0.2.1-1.fc45.x86_64.rpm
 sudo systemctl enable --now elastic-swap
 ```
 

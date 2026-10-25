@@ -36,6 +36,10 @@ Restart=on-failure
 RestartSec=5s
 TimeoutStopSec=300
 OOMScoreAdjust=-500
+# systemd-oomd picks victims by memory pressure, not by OOMScoreAdjust=, and this
+# unit sits in system.slice, which it monitors. Killing the daemon at the peak of
+# pressure would only delay the swap growth that relieves it.
+ManagedOOMPreference=omit
 CapabilityBoundingSet=CAP_SYS_ADMIN
 # Every device this daemon touches is created *while it runs*: zram nodes come
 # from /sys/class/zram-control/hot_add, loop nodes from losetup on the writeback

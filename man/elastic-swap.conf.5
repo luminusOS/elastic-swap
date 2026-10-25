@@ -1,4 +1,4 @@
-.TH ELASTIC-SWAP.CONF 5 "OCTOBER 2026" "elastic-swap 0.2.0" elastic-swap.conf
+.TH ELASTIC-SWAP.CONF 5 "OCTOBER 2026" "elastic-swap 0.2.1" elastic-swap.conf
 .\" disable french spacing
 .ss 12 0
 .SH NAME
@@ -132,7 +132,7 @@ No file is removed while free RAM is under this percentage (default 20). Below i
 .IP swapfile_free_swap_perc=
 Create a file when the files' free space falls under this percentage (default 40).
 .IP swapfile_remove_free_swap_perc=
-Remove a file when the files' free space is above this percentage (default 70).
+Remove a file when the files' free space is above this percentage (default 70). The zswap mode ignores it and removes a file only above 85%, with more than two unused files and 300 seconds after the last creation.
 .IP swapfile_frequency=
 Seconds between checks while files exist, 1\(en86400 (default 1).
 .IP swapfile_shrink_threshold=

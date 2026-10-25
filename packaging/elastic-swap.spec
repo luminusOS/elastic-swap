@@ -1,5 +1,5 @@
 Name:           elastic-swap
-Version:        0.2.0
+Version:        0.2.1
 Release:        1%{?dist}
 Summary:        Dynamic swap management for zram, zswap and swap files
 # MIT and BSD-3-Clause come from the statically linked crates (see LICENSE.dependencies).
@@ -75,6 +75,13 @@ cargo test --release --locked --offline
 %{_mandir}/man8/elastic-swap.8*
 
 %changelog
+* Sat Oct 24 2026 LuminusOS <noreply@luminusos.invalid> - 0.2.1-1
+- Fix a failed first swap activation leaving the daemon running with no swap
+- Keep the daemon out of systemd-oomd's reach (ManagedOOMPreference=omit)
+- Read the configured swapfile_path when detecting the filesystem
+- Correct the documented removal thresholds of the zswap mode
+- Log a failed expansion and wait before trying again
+
 * Sat Oct 24 2026 LuminusOS <noreply@luminusos.invalid> - 0.2.0-1
 - Fork of biglinux-systemd-swap, renamed to elastic-swap
 - Swap files default to /var/swap, created by "elastic-swap prepare"

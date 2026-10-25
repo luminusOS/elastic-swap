@@ -18,9 +18,8 @@ pub struct SystemCapabilities {
 }
 
 impl SystemCapabilities {
-    /// Detect system capabilities
-    pub fn detect() -> Self {
-        let swap_path = defaults::SWAPFILE_PATH;
+    /// Detect system capabilities for the filesystem holding `swap_path`.
+    pub fn detect(swap_path: &str) -> Self {
         let swap_path_fstype = get_fstype(swap_path).or_else(|| get_fstype("/"));
         let total_ram = get_ram_size().unwrap_or(0);
         let free_space = Self::get_free_disk_space(swap_path).unwrap_or(0);

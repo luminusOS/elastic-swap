@@ -11,7 +11,7 @@ while :; do
     printf '%s:%s ' "${d##*/}" "$(awk -v ds="$(cat "$d/disksize")" \
       '{printf "ds=%d orig=%d phys=%d ml=%d", ds / 1048576, $1 / 1048576, $3 / 1048576, $4 / 1048576}' "$d/mm_stat")"
   done
-  printf 'files=%s werr=%s\n' "$(grep -c '^/swapfile' /proc/swaps)" \
+  printf 'files=%s werr=%s\n' "$(grep -c '^/var/swap/' /proc/swaps)" \
     "$(dmesg | grep -c 'Write-error')"
   sleep 2
 done

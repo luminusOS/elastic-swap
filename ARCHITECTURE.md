@@ -43,16 +43,19 @@ Daemon (`elastic-swap start`):
 parse CLI ──► DRY_RUN flag set (`--dry-run` never reaches start(): dry_run_plan())
    │
    ▼
-am_i_root() ──► SystemCapabilities::detect()  // RAM, free disk, fstype, live ISO
+am_i_root()
    │
-   ▼
-clear_previous_instance()   // restores zswap, clears the work dir; running zram
-   │                        // devices and swap files are adopted, not swapped off
    ▼
 Config::load()  ◄── /usr/share/elastic-swap/swap-default.conf
                   ◄── /etc/elastic-swap/swap.conf
                   ◄── conf.d fragments  (etc > run > lib precedence)
    │
+   ▼
+SystemCapabilities::detect(swapfile_path)  // RAM, free disk, fstype, live ISO
+   │
+   ▼
+clear_previous_instance()   // restores zswap, clears the work dir; running zram
+   │                        // devices and swap files are adopted, not swapped off
    ▼
 get_swap_mode(config)
    │        ├── Auto       ──► RecommendedConfig → ZramSwapfc | ZramOnly
@@ -162,7 +165,7 @@ check `elastic_swap::is_dry_run()` as a second guard; the rest do not.
 - Heavy systemd unit hardening — `include/elastic-swap.service`:
   `ProtectSystem=strict`, `CapabilityBoundingSet=CAP_SYS_ADMIN`,
   `SystemCallFilter=@system-service @swap @mount`,
-  `ReadWritePaths=/sys /run -/swapfile` (every entry must
+  `ReadWritePaths=/sys /run -/var/swap` (every entry must
   exist when the namespace is built, or the unit exits 226/NAMESPACE before
   ExecStart — hence the `-` on the runtime-created swap directory),
   `PrivateNetwork=yes`, `NoNewPrivileges=yes`. Deliberately *no*

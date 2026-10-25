@@ -32,4 +32,14 @@ BSD-3-Clause licences (several are dual MIT or Apache-2.0, and the MIT terms
 are used). Their notices are in LICENSE.dependencies, included in the RPM and
 in the source tarball and generated from the vendored crates.
 
+Source offer. Every release of elastic-swap carries the corresponding source:
+the source RPM and the source and vendored-crates tarballs are attached to
+https://github.com/luminusOS/elastic-swap/releases. A system image that
+contains the binary can get the same source from that page, and from the
+repository at the tag that matches the installed version.
+
+Modifications. elastic-swap changes biglinux-systemd-swap (itself derived from
+systemd-swap) from 2026-10-24 onward. The changes are recorded in the git
+history of this repository, starting after commit 61cf629.
+
 elastic-swap is not part of systemd and is not endorsed by the systemd project.

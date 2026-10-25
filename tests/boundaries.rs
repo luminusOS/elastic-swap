@@ -113,3 +113,11 @@ fn shipped_defaults_select_zswap_with_swap_files() {
         .expect("swap_mode missing");
     assert_eq!(mode, "zswap+swapfile");
 }
+
+// oomd does not read OOMScoreAdjust=. Without this the daemon that grows swap
+// is as killable as any other service in system.slice.
+#[test]
+fn unit_is_never_chosen_by_oomd() {
+    let unit = include_str!("../include/elastic-swap.service");
+    assert!(unit.lines().any(|l| l == "ManagedOOMPreference=omit"));
+}
