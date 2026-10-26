@@ -45,7 +45,7 @@ Swap files are the overflow of every mode except `zram`.
 - Priority: negative, below zram, so the kernel uses them only when zram is full.
 - NOCOW: enabled on btrfs, which prevents a deadlock under memory pressure.
 - Created when: the free space in the files drops under 40%, every file is at least 85% full, or free RAM is at most 20% while total free swap is under 15%. The last rule acts ahead of systemd-oomd's default 90% swap limit.
-- Removed when: the free space in the files rises over 70% and free RAM is over 20%. In `zswap+swapfile` mode the daemon is more careful, because the files are write-back targets: it needs more than 85% free (the setting is ignored), more than two unused files, and 300 seconds since the last file this run created.
+- Removed when: the free space in the files rises over 70% (`swapfile_remove_free_swap_perc`) and free RAM is over 20%. The daemon picks the emptiest file that is at most 30% used, as long as the other files can take its pages and still stay at least 55% free (15 points above the 40% that creates a file, which keeps a removal from triggering a new file; the margin is capped at 90%). Removing a file swaps its pages back into RAM first, so free RAM must stay above 20% even after taking them. Files of one priority share their pages round-robin, so none is ever completely empty; that is why the rule looks at total usage and not at empty files. After a creation or a removal it waits 60 seconds, or 300 in `zswap+swapfile` mode, whose files are write-back targets.
 
 ## Zram pool
 
@@ -82,7 +82,8 @@ Swap file monitor (every second while files exist):
   files' free space < 40%                        -> create a 512 MB swap file
   free RAM <= 20% and total free swap < 15%      -> create a headroom file now
   files' free space > 70% and free RAM > 20%     -> remove an idle file
-                                                    (zswap mode: > 85% free, > 2 unused files, 300 s)
+                                                    (the emptiest file under 30% used, if the others
+                                                    stay >= 55% free; 60 s pause, 300 s with zswap)
 
 Zram pool monitor (every 5 seconds):
   utilization > 85%                   -> add a zram device (up to 8)

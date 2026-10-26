@@ -1,4 +1,4 @@
-.TH ELASTIC-SWAP.CONF 5 "OCTOBER 2026" "elastic-swap 0.2.2" elastic-swap.conf
+.TH ELASTIC-SWAP.CONF 5 "OCTOBER 2026" "elastic-swap 0.2.3" elastic-swap.conf
 .\" disable french spacing
 .ss 12 0
 .SH NAME
@@ -132,14 +132,14 @@ No file is removed while free RAM is under this percentage (default 20). Below i
 .IP swapfile_free_swap_perc=
 Create a file when the files' free space falls under this percentage (default 40).
 .IP swapfile_remove_free_swap_perc=
-Remove a file when the files' free space is above this percentage (default 70). The zswap mode ignores it and removes a file only above 85%, with more than two unused files and 300 seconds after the last creation.
+Remove a file when the files' free space is above this percentage (default 70). The emptiest file at or under swapfile_shrink_threshold is chosen, provided the others can absorb its pages and free RAM stays above swapfile_free_ram_perc once they are swapped back in. After any creation or removal the daemon waits 60 seconds, or 300 in the zswap mode.
 .IP swapfile_frequency=
 Seconds between checks while files exist, 1\(en86400 (default 1).
 .IP swapfile_shrink_threshold=
 A file less used than this percentage may be removed, 10\(en50 (default 30).
 .IP swapfile_safe_headroom=
 Percentage the remaining files must keep free after absorbing a removed file's
-pages, 20\(en60 (default 40).
+pages, 20\(en60 (default 40). The daemon uses at least swapfile_free_swap_perc plus 15 (at most 90), so a removal does not leave the files just under the point that creates a new one.
 .SS MGLRU
 .IP mglru_min_ttl_ms=
 Pages younger than this many milliseconds are not reclaimed (default 1000;

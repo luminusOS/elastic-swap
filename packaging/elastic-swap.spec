@@ -1,5 +1,5 @@
 Name:           elastic-swap
-Version:        0.2.2
+Version:        0.2.3
 Release:        1%{?dist}
 Summary:        Dynamic swap management for zram, zswap and swap files
 # MIT and BSD-3-Clause come from the statically linked crates (see LICENSE.dependencies).
@@ -76,6 +76,14 @@ cargo test --release --locked --offline
 %{_mandir}/man8/elastic-swap.8*
 
 %changelog
+* Sun Oct 25 2026 LuminusOS <noreply@luminusos.invalid> - 0.2.3-1
+- Shrink the swap files by total usage. The zswap mode required more than two
+  files with exactly zero use, which round-robin allocation never produces, so
+  the files only grew
+- Honor swapfile_remove_free_swap_perc in the zswap mode, remove the emptiest
+  file first, and keep a 15 point margin above the creation trigger
+- Wait after a failed removal instead of retrying every second
+
 * Sat Oct 24 2026 LuminusOS <noreply@luminusos.invalid> - 0.2.2-1
 - Create the swap directory from elastic-swap-prepare.service. systemd bind
   mounts ReadWritePaths= for every command of a unit, "+" prefix included, so

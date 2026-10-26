@@ -9,14 +9,17 @@ use std::time::{Duration, Instant};
 use thiserror::Error;
 
 use crate::config::Config;
+use crate::config::RUN_SYSD;
 use crate::defaults;
 use crate::helpers::{
     force_remove, get_fstype, makedirs, parse_size as parse_size_shared, run_cmd_output,
 };
 use crate::meminfo::{
-    get_effective_swap_usage, get_free_ram_percent, get_free_swap_percent_effective,
+    get_effective_swap_usage, get_free_ram_percent, get_free_swap_percent_effective, get_mem_stats,
 };
-use crate::systemd::{activate_swap, gen_swap_unit, notify_ready, notify_status, swapoff};
+use crate::systemd::{
+    activate_swap, gen_swap_unit, notify_ready, notify_status, swapoff, systemctl, SystemctlAction,
+};
 use crate::{debug, info, is_shutdown, warn};
 
 #[derive(Error, Debug)]
@@ -60,6 +63,17 @@ impl SwapFileInfo {
 }
 
 const MB: u64 = 1024 * 1024;
+
+/// Points above the creation trigger that the files must still be free after a
+/// removal. Without a gap, taking a file away could leave the free share just
+/// under `free_swap_perc`, and the next tick would create the file again.
+const REMOVAL_HEADROOM_MARGIN: u64 = 15;
+
+/// Whether free RAM stays above `floor_perc` once `moved` bytes of swapped-out
+/// pages have been brought back by a `swapoff`.
+fn ram_stays_comfortable(available: u64, total: u64, moved: u64, floor_perc: u8) -> bool {
+    total > 0 && available.saturating_sub(moved).saturating_mul(100) / total > floor_perc as u64
+}
 
 /// SwapFree under which the disk tier grows while RAM is short: 15% of
 /// SwapTotal, 5 points clear of systemd-oomd's default `SwapUsedLimit=90%`,
@@ -238,6 +252,9 @@ pub struct SwapFile {
     is_btrfs: bool,
     /// Cooldown: last time a swap file was created (prevents runaway creation)
     last_creation: Option<Instant>,
+    /// When a file was last removed, or a removal last failed: spaces the
+    /// attempts so a stuck `swapoff` is not retried every second.
+    last_removal: Option<Instant>,
     /// Escalating cooldown in seconds (doubles on each creation, resets when swap is consumed)
     cooldown_secs: u64,
     /// Previous free_swap percentage (to detect when swap is actually being consumed)
@@ -431,6 +448,7 @@ impl SwapFile {
             allocated: 0,
             is_btrfs,
             last_creation: None,
+            last_removal: None,
             cooldown_secs: if is_zswap_active { 5 } else { 15 },
             prev_free_swap: 100,
             is_zswap_active,
@@ -500,8 +518,58 @@ impl SwapFile {
         files
     }
 
-    /// Find a safe candidate for removal
-    /// Returns None if no removal is safe
+    /// Whether the monitor may shed a file on this tick.
+    ///
+    /// The files must be mostly idle and RAM comfortable. A pause after the last
+    /// creation or removal keeps a create/remove cycle from forming; zswap waits
+    /// longer because its files are write-back targets.
+    fn shrink_due(&self, disk_free_percent: u8, free_ram: u8) -> bool {
+        if self.allocated <= self.config.min_count {
+            return false;
+        }
+        let pause = Duration::from_secs(if self.is_zswap_active { 300 } else { 60 });
+        let settled = [self.last_creation, self.last_removal]
+            .into_iter()
+            .flatten()
+            .all(|t| t.elapsed() >= pause);
+        disk_free_percent > self.config.remove_free_swap_perc
+            && free_ram > self.config.free_ram_perc
+            && settled
+    }
+
+    /// The file to shed on this tick, if any.
+    ///
+    /// `swapoff` swaps the file's pages back into RAM, so RAM must stay above the
+    /// floor even after taking them. `ram` is (MemAvailable, MemTotal) in bytes;
+    /// without it the plain free-RAM check in `shrink_due` is all there is.
+    fn next_removal<'a>(
+        &self,
+        files: &'a [SwapFileInfo],
+        disk_free_percent: u8,
+        free_ram: u8,
+        ram: Option<(u64, u64)>,
+    ) -> Option<&'a SwapFileInfo> {
+        if !self.shrink_due(disk_free_percent, free_ram) {
+            return None;
+        }
+        let candidate = self.find_safe_removal_candidate(files)?;
+        match ram {
+            Some((available, total))
+                if !ram_stays_comfortable(
+                    available,
+                    total,
+                    candidate.used_bytes,
+                    self.config.free_ram_perc,
+                ) =>
+            {
+                None
+            }
+            _ => Some(candidate),
+        }
+    }
+
+    /// Find a safe candidate for removal.
+    /// Returns None if no removal is safe.
     fn find_safe_removal_candidate<'a>(
         &self,
         files: &'a [SwapFileInfo],
@@ -520,10 +588,10 @@ impl SwapFile {
             return None; // No file is empty enough
         }
 
-        // Sort candidates by priority ASCENDING (Lowest first)
-        // We want to remove low-priority files (created last, usually larger) first
-        // to scale down properly instead of leaving a giant tail file alone.
-        candidates.sort_by_key(|c| c.priority);
+        // Lowest priority first, then the emptiest: files of one priority share
+        // the pages round-robin, so none is empty and the cheapest `swapoff` is
+        // the one that has the least to move.
+        candidates.sort_by_key(|c| (c.priority, c.used_bytes));
 
         // For each candidate, verify if it's SAFE to remove
         candidates
@@ -558,8 +626,12 @@ impl SwapFile {
         let data_to_migrate = target.used_bytes;
 
         // Verify if there's enough space WITH safety margin
-        // Want to maintain at least safe_headroom% free after migration
-        let required_headroom = (other_total_size * self.config.safe_headroom as u64) / 100;
+        // Want to maintain at least safe_headroom% free after migration, and
+        // never less than a margin above the point where a file gets created.
+        let headroom_perc = (self.config.safe_headroom as u64)
+            .max(self.config.free_swap_perc as u64 + REMOVAL_HEADROOM_MARGIN)
+            .min(90);
+        let required_headroom = (other_total_size * headroom_perc) / 100;
         let required_free = data_to_migrate + required_headroom;
 
         if other_free_space < required_free {
@@ -599,6 +671,15 @@ impl SwapFile {
                 if let Ok(content) = crate::helpers::read_file(&unit_path) {
                     if content.lines().any(|line| line.trim() == tag_line) {
                         force_remove(&unit_path, true);
+                        if let Some(name) = Path::new(&unit_path).file_name() {
+                            for target in ["swap.target.wants", "local-fs.target.wants"] {
+                                force_remove(
+                                    Path::new(RUN_SYSD).join("system").join(target).join(name),
+                                    false,
+                                );
+                            }
+                        }
+                        let _ = systemctl(SystemctlAction::DaemonReload, "");
                         break;
                     }
                 }
@@ -919,52 +1000,31 @@ impl SwapFile {
                 }
             }
 
-            // CONTRACTION DECISION: check if swap is abundant enough to remove files
-            if self.allocated > self.config.min_count {
-                // ZSWAP: must always keep at least 2 unused reserve files.
-                // Never remove if it would drop below the reserve threshold.
-                if self.is_zswap_active {
-                    let unused_count = swap_files.iter().filter(|f| f.used_bytes == 0).count();
-                    if unused_count <= 2 {
-                        // At or below minimum reserve — skip contraction
-                        continue;
+            // CONTRACTION. Judged on how idle OUR files are, never on zram's
+            // `free_swap` (it read as abundant while RAM was short). Not on
+            // files at exactly zero use either: files of one priority fill
+            // round-robin, so each keeps a few pages of long-lived programs and
+            // none gets there, which is how the files only ever grew.
+            if self.shrink_due(disk_free_percent, free_ram) {
+                let ram = get_mem_stats(&["MemAvailable", "MemTotal"])
+                    .ok()
+                    .map(|m| (m["MemAvailable"], m["MemTotal"]));
+                if let Some(candidate) =
+                    self.next_removal(&swap_files, disk_free_percent, free_ram, ram)
+                {
+                    info!(
+                        "swapFC: disk_free={}% > {}% (thresh), free_ram={}%, removing {} (usage: {}%)",
+                        disk_free_percent,
+                        self.config.remove_free_swap_perc,
+                        free_ram,
+                        candidate.path.display(),
+                        candidate.usage_percent()
+                    );
+                    let path = candidate.path.clone();
+                    if self.destroy_swapfile_by_path(&path).is_ok() {
+                        self.disk_full = false; // Space freed, allow expansion again
                     }
-                }
-
-                // ZSWAP: be conservative — swapfiles are writeback targets.
-                let remove_threshold = if self.is_zswap_active {
-                    85
-                } else {
-                    self.config.remove_free_swap_perc
-                };
-
-                // ZSWAP: 5 minutes minimum cooldown to prevent create-remove cycles
-                let removal_cooldown_secs = if self.is_zswap_active { 300 } else { 60 };
-                let removal_cooldown_ok = self
-                    .last_creation
-                    .map(|t| t.elapsed() >= Duration::from_secs(removal_cooldown_secs))
-                    .unwrap_or(true);
-
-                // Shed a file only when OUR files are the thing that is idle,
-                // and only while RAM is still comfortable. The reading used to
-                // be `free_swap`, so a mostly-empty zram read as abundant swap
-                // and the chunk went away exactly when RAM was getting short.
-                let ram_comfortable = free_ram > self.config.free_ram_perc;
-                if disk_free_percent > remove_threshold && ram_comfortable && removal_cooldown_ok {
-                    if let Some(candidate) = self.find_safe_removal_candidate(&swap_files) {
-                        info!(
-                            "swapFC: disk_free={}% > {}% (thresh), free_ram={}%, removing {} (usage: {}%)",
-                            disk_free_percent,
-                            remove_threshold,
-                            free_ram,
-                            candidate.path.display(),
-                            candidate.usage_percent()
-                        );
-                        let path = candidate.path.clone();
-                        if self.destroy_swapfile_by_path(&path).is_ok() {
-                            self.disk_full = false; // Space freed, allow expansion again
-                        }
-                    }
+                    self.last_removal = Some(Instant::now());
                 }
             }
         }
@@ -1469,6 +1529,7 @@ mod tests {
             allocated: 1,
             is_btrfs: false,
             last_creation: None,
+            last_removal: None,
             cooldown_secs: 15,
             prev_free_swap: 100,
             is_zswap_active: true,
@@ -1548,5 +1609,177 @@ mod tests {
             let e = std::io::Error::from_raw_os_error(errno);
             assert!(!directory_is_pinned(&e), "errno {errno}");
         }
+    }
+
+    fn file(index: u32, used_mb: f64) -> SwapFileInfo {
+        SwapFileInfo {
+            path: PathBuf::from(format!("/var/swap/{index}")),
+            size_bytes: 512 * MB,
+            used_bytes: (used_mb * MB as f64) as u64,
+            priority: -1,
+        }
+    }
+
+    // The 14 files of the first long session on a real machine: 2.9 GiB spread
+    // over every file, the emptiest still holding a few MB, none at zero.
+    fn spread_files() -> Vec<SwapFileInfo> {
+        [
+            181.0, 331.2, 237.1, 285.1, 263.6, 157.5, 90.7, 107.0, 103.2, 35.2, 29.1, 4.4, 7.6, 4.5,
+        ]
+        .iter()
+        .enumerate()
+        .map(|(i, used)| file(i as u32 + 1, *used))
+        .collect()
+    }
+
+    #[test]
+    fn spread_usage_still_lets_a_file_go() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut swap = swapfile_in(tmp.path());
+        swap.allocated = 14;
+        let files = spread_files();
+
+        let candidate = swap.find_safe_removal_candidate(&files).unwrap();
+        assert_eq!(candidate.path, PathBuf::from("/var/swap/12"));
+    }
+
+    #[test]
+    fn busy_files_are_never_removed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut swap = swapfile_in(tmp.path());
+        swap.allocated = 14;
+        let files: Vec<_> = (1..=14).map(|i| file(i, 300.0)).collect();
+
+        assert!(swap.find_safe_removal_candidate(&files).is_none());
+    }
+
+    #[test]
+    fn removal_keeps_a_margin_above_the_creation_trigger() {
+        let tmp = tempfile::tempdir().unwrap();
+        let swap = swapfile_in(tmp.path());
+        let size = 1000 * MB;
+        let target = SwapFileInfo {
+            path: PathBuf::from("/var/swap/3"),
+            size_bytes: size,
+            used_bytes: 0,
+            priority: -1,
+        };
+        let others = |used: u64| {
+            vec![
+                SwapFileInfo {
+                    path: PathBuf::from("/var/swap/1"),
+                    size_bytes: size,
+                    used_bytes: used,
+                    priority: -1,
+                },
+                SwapFileInfo {
+                    path: PathBuf::from("/var/swap/2"),
+                    size_bytes: size,
+                    used_bytes: used,
+                    priority: -1,
+                },
+                target.clone(),
+            ]
+        };
+
+        // 45% free afterwards is above the 40% that creates a file, but below
+        // the 55% margin, so the file would come straight back.
+        assert!(!swap.can_safely_remove(&target, &others(550 * MB)));
+        assert!(swap.can_safely_remove(&target, &others(400 * MB)));
+    }
+
+    #[test]
+    fn the_emptiest_of_equal_priority_files_goes_first() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut swap = swapfile_in(tmp.path());
+        swap.allocated = 3;
+        let files = vec![file(1, 50.0), file(2, 5.0), file(3, 20.0)];
+
+        let candidate = swap.find_safe_removal_candidate(&files).unwrap();
+        assert_eq!(candidate.path, PathBuf::from("/var/swap/2"));
+    }
+
+    #[test]
+    fn shrinking_waits_for_idle_files_comfortable_ram_and_a_pause() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut swap = swapfile_in(tmp.path());
+        swap.allocated = 14;
+        let long_ago = Instant::now()
+            .checked_sub(Duration::from_secs(400))
+            .unwrap();
+
+        assert!(swap.shrink_due(74, 80), "idle files, free RAM, no history");
+        assert!(
+            !swap.shrink_due(70, 80),
+            "70% free is not above the 70% threshold"
+        );
+        assert!(!swap.shrink_due(74, 20), "RAM at the floor");
+
+        swap.last_creation = Some(Instant::now());
+        assert!(!swap.shrink_due(74, 80), "a file was just created");
+        swap.last_creation = Some(long_ago);
+        assert!(swap.shrink_due(74, 80));
+
+        swap.last_removal = Some(Instant::now());
+        assert!(
+            !swap.shrink_due(74, 80),
+            "a file was just removed or failed to"
+        );
+
+        swap.last_removal = None;
+        swap.allocated = swap.config.min_count;
+        assert!(!swap.shrink_due(100, 80), "never below the minimum");
+    }
+
+    #[test]
+    fn the_pause_is_longer_with_zswap_than_without() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut swap = swapfile_in(tmp.path());
+        swap.allocated = 14;
+        swap.last_creation = Some(
+            Instant::now()
+                .checked_sub(Duration::from_secs(100))
+                .unwrap(),
+        );
+
+        swap.is_zswap_active = false;
+        assert!(swap.shrink_due(74, 80), "60 s have passed");
+        swap.is_zswap_active = true;
+        assert!(!swap.shrink_due(74, 80), "zswap waits 300 s");
+    }
+
+    #[test]
+    fn the_pages_a_swapoff_brings_back_count_against_free_ram() {
+        let gib = 1024 * MB;
+        // 25% of 32 GiB is available: comfortable at a 20% floor on its own.
+        assert!(ram_stays_comfortable(8 * gib, 32 * gib, 0, 20));
+        // Taking 2 GiB of pages back leaves 18.75%: under the floor.
+        assert!(!ram_stays_comfortable(8 * gib, 32 * gib, 2 * gib, 20));
+        // More pages than available RAM never wraps around.
+        assert!(!ram_stays_comfortable(gib, 32 * gib, 4 * gib, 20));
+        assert!(!ram_stays_comfortable(8 * gib, 0, 0, 20));
+    }
+
+    #[test]
+    fn a_removal_is_decided_in_one_place() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut swap = swapfile_in(tmp.path());
+        swap.allocated = 14;
+        let files = spread_files();
+        let gib = 1024 * MB;
+
+        // The real snapshot: 74% free, RAM plentiful -> file 12 goes.
+        let ram = Some((20 * gib, 30 * gib));
+        let chosen = swap.next_removal(&files, 74, 66, ram).unwrap();
+        assert_eq!(chosen.path, PathBuf::from("/var/swap/12"));
+
+        // Too little RAM would be left after the pages come back.
+        let tight = Some((6 * gib + 4 * MB, 30 * gib));
+        assert!(swap.next_removal(&files, 74, 66, tight).is_none());
+
+        // Not idle enough, or too soon after a change.
+        assert!(swap.next_removal(&files, 60, 66, ram).is_none());
+        swap.last_removal = Some(Instant::now());
+        assert!(swap.next_removal(&files, 74, 66, ram).is_none());
     }
 }
