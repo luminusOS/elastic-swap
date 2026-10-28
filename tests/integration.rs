@@ -52,10 +52,10 @@ fn auto_zram_swapfc_feeds_swapfile_config() {
     };
     let mut cfg = Config::from_pairs_for_tests([("swapfile_path", "/swap")]);
     cfg.apply_autoconfig(&rec);
-    assert_eq!(cfg.get("swapfile_max_count").unwrap(), "28");
+    assert_eq!(cfg.get("swapfile_max_count").unwrap(), "24");
     assert_eq!(cfg.get("swapfile_chunk_size").unwrap(), "512M");
     let sc = SwapFileConfig::from_config(&cfg).unwrap();
-    assert_eq!(sc.max_count, 28);
+    assert_eq!(sc.max_count, 24);
     assert_eq!(sc.chunk_size, 512 * 1024 * 1024);
 
     let mut cfg = Config::from_pairs_for_tests([("swapfile_path", "/swap")]);

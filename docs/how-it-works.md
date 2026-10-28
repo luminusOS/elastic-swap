@@ -40,8 +40,9 @@ The daemon disables zswap when a zram mode is selected, because the kernel docum
 Swap files are the overflow of every mode except `zram`.
 
 - Location: `/var/swap`. `elastic-swap prepare` creates it as a NOCOW subvolume on btrfs and as a plain directory elsewhere.
-- Size: 512 MB each, created on demand. On btrfs a headroom file is sized to bring total free swap back to twice the trigger level.
-- Limit: 28 files, 14 GB in total.
+- Size: on btrfs, where a file is preallocated at no cost, 512 MB for the first 8 files, 1 GB for the next 8 and 2 GB after that, and at least 2 GB for the last free swap area. Twenty-four files then add up to 28 GB when no other swap area is active. A headroom file can be larger still: it is sized to bring total free swap back to twice the trigger level. On other filesystems every file is 512 MB, because the file is filled with zeros. A configured `swapfile_chunk_size` is scaled the same way. A file is halved, down to the base size, until twice its size is free on the disk.
+- Limit: 24 files. The kernel accepts a fixed number of swap areas at once, counting zram devices and partitions as well, and refuses a `swapon` past it with `Operation not permitted`. It was 24 on the one kernel measured (7.2.11). The daemon counts every active area and stops creating files when none is left. In the zram modes it keeps free the areas that zram devices may still take (7 by default), so a `zram+swapfile` host gets at most 16 files, about 13 GB on btrfs. If a `swapon` is refused with fewer areas active (at least 16), it takes that number as the limit for an hour. That is why the files grow instead of multiplying.
+- After a failed creation it waits 10 seconds, then 20, 40 and so on up to an hour. A success, or a removal that frees an area, starts over.
 - Priority: negative, below zram, so the kernel uses them only when zram is full.
 - NOCOW: enabled on btrfs, which prevents a deadlock under memory pressure.
 - Created when: the free space in the files drops under 40%, every file is at least 85% full, or free RAM is at most 20% while total free swap is under 15%. The last rule acts ahead of systemd-oomd's default 90% swap limit.
@@ -79,7 +80,7 @@ Memory pressure (free RAM < threshold)
        zswap: compress in the kernel pool, the shrinker writes back to disk
 
 Swap file monitor (every second while files exist):
-  files' free space < 40%                        -> create a 512 MB swap file
+  files' free space < 40%                        -> create a swap file (512 MB at first, see Swap files)
   free RAM <= 20% and total free swap < 15%      -> create a headroom file now
   files' free space > 70% and free RAM > 20%     -> remove an idle file
                                                     (the emptiest file under 30% used, if the others

@@ -64,6 +64,122 @@ impl SwapFileInfo {
 
 const MB: u64 = 1024 * 1024;
 
+/// Swap areas the kernel accepts at once (MAX_SWAPFILES), counting every
+/// swapon: zram devices and partitions as well as these files. Some slots are
+/// reserved for migration and device-private entries; it was 24 on the 7.2.11
+/// kernel this was measured on. A swapon past it fails with EPERM.
+const KERNEL_SWAP_AREAS: usize = 24;
+
+/// A swapon failure with fewer areas than this is not read as "the kernel is
+/// full": no kernel allows so few.
+const MIN_PLAUSIBLE_AREA_LIMIT: usize = 16;
+
+/// The file size doubles after this many of our files, up to `MAX_SIZE_STEPS`
+/// times, so the capacity does not depend on how many areas the kernel allows.
+const FILES_PER_SIZE_STEP: usize = 8;
+const MAX_SIZE_STEPS: u32 = 2;
+
+const BACKOFF_BASE_SECS: u64 = 10;
+const BACKOFF_MAX_SECS: u64 = 3600;
+
+/// A limit learned from a failed swapon is forgotten after this long, in case
+/// the failure was a race and not the kernel's real ceiling.
+const LEARNED_LIMIT_TTL_SECS: u64 = 3600;
+
+/// Active swap areas in the text of /proc/swaps, header excluded.
+fn swap_areas_in(proc_swaps: &str) -> usize {
+    proc_swaps
+        .lines()
+        .skip(1)
+        .filter(|l| !l.trim().is_empty())
+        .count()
+}
+
+/// Size of the next file: `base`, doubled for every `FILES_PER_SIZE_STEP` files
+/// already there, and at least the largest size once only one area is left, so
+/// the last slot carries as much as it can.
+fn chunk_for(base: u64, files: usize, areas_left: usize) -> u64 {
+    let step = (files / FILES_PER_SIZE_STEP).min(MAX_SIZE_STEPS as usize) as u32;
+    let size = base.saturating_mul(1 << step);
+    if areas_left <= 1 {
+        size.max(base.saturating_mul(1 << MAX_SIZE_STEPS))
+    } else {
+        size
+    }
+}
+
+/// Wait after the `failures`-th failure in a row: 10 s, doubling, up to an hour.
+fn backoff_secs(failures: u32) -> u64 {
+    BACKOFF_BASE_SECS
+        .saturating_mul(1u64 << failures.saturating_sub(1).min(9))
+        .min(BACKOFF_MAX_SECS)
+}
+
+/// Halve `size` toward `base` until twice of it is free on the disk, so a big
+/// file never fails where a small one would have fitted. Returns `base` when
+/// even that does not fit; the caller then reports the disk as full.
+fn fit_to_space(size: u64, base: u64, free_bytes: u64) -> u64 {
+    let mut size = size;
+    while size > base && free_bytes < size.saturating_mul(2) {
+        size = (size / 2).max(base);
+    }
+    size
+}
+
+/// Areas to keep free for zram devices that are not active yet. Nothing when
+/// no zram device is active: the pool never started, so none will be added.
+fn zram_areas_reserved(proc_swaps: &str, max_devices: usize) -> usize {
+    let active = proc_swaps
+        .lines()
+        .skip(1)
+        .filter(|l| l.starts_with("/dev/zram"))
+        .count();
+    if active == 0 {
+        0
+    } else {
+        max_devices.saturating_sub(active)
+    }
+}
+
+/// Areas still free for new files, and how many of the missing ones are kept
+/// back for zram: the ceiling minus every active area minus that reserve.
+fn areas_free(
+    proc_swaps: &str,
+    limit: usize,
+    zswap: bool,
+    zram_max_devices: usize,
+) -> (usize, usize) {
+    let reserved = if zswap {
+        0
+    } else {
+        zram_areas_reserved(proc_swaps, zram_max_devices)
+    };
+    let left = limit
+        .saturating_sub(swap_areas_in(proc_swaps))
+        .saturating_sub(reserved);
+    (left, reserved)
+}
+
+/// Whether `systemctl start` of the swap unit failed, which is what a swapon
+/// the kernel refuses looks like. Disk, mkswap and unit-writing errors are
+/// other variants.
+fn is_activation_failure(e: &SwapFileError) -> bool {
+    matches!(
+        e,
+        SwapFileError::Systemd(crate::systemd::SystemdError::CommandFailed(_))
+    )
+}
+
+/// The area ceiling after a failed swapon: the number of areas that were
+/// active, when that is a believable kernel limit and lower than the current.
+fn learned_area_limit(current: usize, areas_in_use: usize) -> usize {
+    if (MIN_PLAUSIBLE_AREA_LIMIT..current).contains(&areas_in_use) {
+        areas_in_use
+    } else {
+        current
+    }
+}
+
 /// Points above the creation trigger that the files must still be free after a
 /// removal. Without a gap, taking a file away could leave the free share just
 /// under `free_swap_perc`, and the next tick would create the file again.
@@ -106,6 +222,8 @@ pub struct SwapFileConfig {
     pub chunk_size: u64,
     pub max_count: u32,
     pub min_count: u32,
+    /// Most zram devices the pool may add; their swap areas are kept free.
+    pub zram_max_devices: usize,
     pub free_ram_perc: u8,
     pub free_swap_perc: u8,
     pub remove_free_swap_perc: u8,
@@ -181,7 +299,7 @@ impl SwapFileConfig {
         let max_count: u32 = config
             .get_as("swapfile_max_count")
             .unwrap_or(defaults::SWAPFILE_MAX_COUNT);
-        let max_count = max_count.clamp(1, 28);
+        let max_count = max_count.clamp(1, KERNEL_SWAP_AREAS as u32);
 
         let min_count: u32 = config
             .get_as("swapfile_min_count")
@@ -217,6 +335,10 @@ impl SwapFileConfig {
             chunk_size,
             max_count,
             min_count,
+            zram_max_devices: config
+                .get_as::<u8>("zram_max_devices")
+                .unwrap_or(defaults::ZRAM_MAX_DEVICES)
+                .clamp(1, 8) as usize,
             free_ram_perc: percent(
                 "swapfile_free_ram_perc",
                 defaults::SWAPFILE_FREE_RAM_PERC,
@@ -255,6 +377,16 @@ pub struct SwapFile {
     /// When a file was last removed, or a removal last failed: spaces the
     /// attempts so a stuck `swapoff` is not retried every second.
     last_removal: Option<Instant>,
+    /// Swap areas the kernel accepts, all kinds together; lowered when a swapon
+    /// fails with fewer active than `KERNEL_SWAP_AREAS`, and restored after
+    /// `LEARNED_LIMIT_TTL_SECS`.
+    area_limit: usize,
+    limit_learned_at: Option<Instant>,
+    /// Creations that failed in a row, and when the next one may be tried.
+    failures: u32,
+    retry_after: Option<Instant>,
+    /// Whether the "no area left" warning was logged for the current spell.
+    cap_logged: bool,
     /// Escalating cooldown in seconds (doubles on each creation, resets when swap is consumed)
     cooldown_secs: u64,
     /// Previous free_swap percentage (to detect when swap is actually being consumed)
@@ -449,6 +581,11 @@ impl SwapFile {
             is_btrfs,
             last_creation: None,
             last_removal: None,
+            area_limit: KERNEL_SWAP_AREAS,
+            limit_learned_at: None,
+            failures: 0,
+            retry_after: None,
+            cap_logged: false,
             cooldown_secs: if is_zswap_active { 5 } else { 15 },
             prev_free_swap: 100,
             is_zswap_active,
@@ -516,6 +653,99 @@ impl SwapFile {
         // Sort by priority (higher priority first - used first by kernel)
         files.sort_by_key(|f| std::cmp::Reverse(f.priority));
         files
+    }
+
+    fn proc_swaps(&self) -> String {
+        std::fs::read_to_string("/proc/swaps").unwrap_or_default()
+    }
+
+    /// Areas still free for new files, and how many are kept back for zram.
+    fn areas_left(&self) -> (usize, usize) {
+        areas_free(
+            &self.proc_swaps(),
+            self.area_limit,
+            self.is_zswap_active,
+            self.config.zram_max_devices,
+        )
+    }
+
+    fn free_disk_bytes(&self) -> u64 {
+        nix::sys::statvfs::statvfs(&self.config.path)
+            .map(|st| st.blocks_available() * st.block_size())
+            .unwrap_or(0)
+    }
+
+    /// Size of the next file. Bigger files only where preallocation makes them
+    /// free (btrfs): elsewhere the file is zero-filled under memory pressure.
+    /// Always small enough for the disk.
+    fn next_chunk(&self, areas_left: usize) -> u64 {
+        let base = self.config.chunk_size;
+        let wanted = if self.is_btrfs {
+            chunk_for(base, self.allocated as usize, areas_left)
+        } else {
+            base
+        };
+        fit_to_space(wanted, base, self.free_disk_bytes())
+    }
+
+    /// Forget a learned limit once it is an hour old.
+    fn relax_area_limit(&mut self) {
+        if self
+            .limit_learned_at
+            .is_some_and(|t| t.elapsed() >= Duration::from_secs(LEARNED_LIMIT_TTL_SECS))
+        {
+            self.area_limit = KERNEL_SWAP_AREAS;
+            self.limit_learned_at = None;
+        }
+    }
+
+    /// Whether a new file may be tried on this tick: disk not full, our own
+    /// limit and the kernel's both with room, and any backoff over.
+    fn may_expand(&self, areas_left: usize) -> bool {
+        !self.disk_full
+            && self.allocated < self.config.max_count
+            && areas_left > 0
+            && self.retry_due()
+    }
+
+    fn retry_due(&self) -> bool {
+        self.retry_after.is_none_or(|t| Instant::now() >= t)
+    }
+
+    fn expansion_succeeded(&mut self) {
+        self.last_creation = Some(Instant::now());
+        self.clear_backoff();
+    }
+
+    fn clear_backoff(&mut self) {
+        self.failures = 0;
+        self.retry_after = None;
+    }
+
+    /// A creation failed: wait longer after each failure in a row. Only a
+    /// failed activation says anything about the kernel: any other failure
+    /// (no disk space, mkswap, writing the unit) says nothing about its limit,
+    /// so only then is the number of active areas taken as the ceiling.
+    fn expansion_failed(&mut self, e: &SwapFileError, areas_in_use: usize) {
+        self.failures = self.failures.saturating_add(1);
+        let wait = backoff_secs(self.failures);
+        self.retry_after = Some(Instant::now() + Duration::from_secs(wait));
+
+        if is_activation_failure(e) {
+            let limit = learned_area_limit(self.area_limit, areas_in_use);
+            if limit != self.area_limit {
+                warn!(
+                    "swapFC: swapon failed with {} swap areas active; taking that as the kernel limit",
+                    limit
+                );
+                self.area_limit = limit;
+                self.limit_learned_at = Some(Instant::now());
+            }
+        }
+        warn!(
+            "swapFC: expansion failed: {}; next attempt in {} s",
+            e, wait
+        );
     }
 
     /// Whether the monitor may shed a file on this tick.
@@ -687,6 +917,8 @@ impl SwapFile {
         }
 
         self.allocated = self.allocated.saturating_sub(1);
+        self.cap_logged = false;
+        self.clear_backoff();
 
         info!("swapFC: {} removed successfully", path.display());
         notify_status("Monitoring memory status...");
@@ -732,7 +964,7 @@ impl SwapFile {
         // These are stale from crashes or force-reboots and waste disk space.
         self.cleanup_stale_disk_files();
 
-        while self.allocated < self.config.min_count {
+        while self.allocated < self.config.min_count && self.areas_left().0 > 0 {
             if let Err(e) = self.create_swapfile(self.config.chunk_size) {
                 warn!(
                     "swapFC: initial swap creation stopped at {}/{}: {}",
@@ -893,7 +1125,22 @@ impl SwapFile {
             // holds a slot in these files, so their fill is what zswap uses up.
             // Zswap mode used to skip all of this and grow only through the
             // removed sparse loop path, which left it at `min_count` files.
-            if !self.disk_full && self.allocated < self.config.max_count {
+            self.relax_area_limit();
+            let (areas_left, zram_kept) = self.areas_left();
+            if areas_left == 0 {
+                if !self.cap_logged {
+                    warn!(
+                        "swapFC: no swap area left for new files ({} active of at most {}, {} kept for zram)",
+                        swap_areas_in(&self.proc_swaps()),
+                        self.area_limit,
+                        zram_kept
+                    );
+                    self.cap_logged = true;
+                }
+            } else {
+                self.cap_logged = false;
+            }
+            if self.may_expand(areas_left) {
                 // Count files with no data yet to avoid pre-allocating more than needed
                 let unused_count = swap_files.iter().filter(|f| f.used_bytes == 0).count();
 
@@ -928,10 +1175,15 @@ impl SwapFile {
                     // in 30 s. Only where the file is preallocated -- zero-filling
                     // gigabytes elsewhere would add writeback under pressure.
                     let refill = headroom_file_size(floor, swap_free, self.config.chunk_size);
-                    let size = if self.is_btrfs && self.has_enough_space(refill) {
-                        refill
+                    let chunk = self.next_chunk(areas_left);
+                    let size = if self.is_btrfs {
+                        fit_to_space(
+                            refill.max(chunk),
+                            self.config.chunk_size,
+                            self.free_disk_bytes(),
+                        )
                     } else {
-                        self.config.chunk_size
+                        chunk
                     };
                     info!(
                         "swapFC: swap headroom low! free_ram={}% swap_free={}MB/{}MB - creating {}MB",
@@ -942,12 +1194,12 @@ impl SwapFile {
                     );
                     match self.create_swapfile(size) {
                         Ok(()) => {
-                            self.last_creation = Some(Instant::now());
+                            self.expansion_succeeded();
                             self.cooldown_secs = 30;
                         }
                         Err(e) => {
-                            warn!("swapFC: expansion failed: {}", e);
-                            self.last_creation = Some(Instant::now());
+                            let in_use = swap_areas_in(&self.proc_swaps());
+                            self.expansion_failed(&e, in_use)
                         }
                     }
                     continue;
@@ -967,14 +1219,14 @@ impl SwapFile {
                         "swapFC: all {} file(s) >= 85% full, disk_free={}% - expanding (stress trigger)",
                         swap_files.len(), disk_free_percent
                     );
-                    match self.create_swapfile(self.config.chunk_size) {
+                    match self.create_swapfile(self.next_chunk(areas_left)) {
                         Ok(()) => {
-                            self.last_creation = Some(Instant::now());
+                            self.expansion_succeeded();
                             self.cooldown_secs = 30;
                         }
                         Err(e) => {
-                            warn!("swapFC: expansion failed: {}", e);
-                            self.last_creation = Some(Instant::now());
+                            let in_use = swap_areas_in(&self.proc_swaps());
+                            self.expansion_failed(&e, in_use)
                         }
                     }
                     continue;
@@ -986,14 +1238,14 @@ impl SwapFile {
                         "swapFC: disk swap pressure! disk_free={}% < {}% (thresh) - expanding (cooldown={}s)",
                         disk_free_percent, swap_threshold, self.cooldown_secs
                     );
-                    match self.create_swapfile(self.config.chunk_size) {
+                    match self.create_swapfile(self.next_chunk(areas_left)) {
                         Ok(()) => {
-                            self.last_creation = Some(Instant::now());
+                            self.expansion_succeeded();
                             self.cooldown_secs = (self.cooldown_secs * 2).min(120);
                         }
                         Err(e) => {
-                            warn!("swapFC: expansion failed: {}", e);
-                            self.last_creation = Some(Instant::now());
+                            let in_use = swap_areas_in(&self.proc_swaps());
+                            self.expansion_failed(&e, in_use)
                         }
                     }
                     continue;
@@ -1458,8 +1710,8 @@ mod tests {
     }
 
     #[test]
-    fn from_config_clamps_max_count_to_28() {
-        for (v, want) in [("28", 28), ("29", 28), ("99", 28)] {
+    fn from_config_clamps_max_count_to_the_kernel_limit() {
+        for (v, want) in [("24", 24), ("25", 24), ("99", 24), ("28", 24), ("10", 10)] {
             let c = cfg(&[("swapfile_max_count", v)]);
             assert_eq!(SwapFileConfig::from_config(&c).unwrap().max_count, want);
         }
@@ -1530,6 +1782,11 @@ mod tests {
             is_btrfs: false,
             last_creation: None,
             last_removal: None,
+            area_limit: KERNEL_SWAP_AREAS,
+            limit_learned_at: None,
+            failures: 0,
+            retry_after: None,
+            cap_logged: false,
             cooldown_secs: 15,
             prev_free_swap: 100,
             is_zswap_active: true,
@@ -1781,5 +2038,192 @@ mod tests {
         assert!(swap.next_removal(&files, 60, 66, ram).is_none());
         swap.last_removal = Some(Instant::now());
         assert!(swap.next_removal(&files, 74, 66, ram).is_none());
+    }
+
+    const PROC_SWAPS: &str = "Filename\tType\tSize\tUsed\tPriority\n\
+        /dev/zram0\tpartition\t1024\t0\t100\n\
+        /var/swap/1\tfile\t524284\t100\t-1\n\
+        /var/swap/2\tfile\t524284\t0\t-1\n";
+
+    #[test]
+    fn every_active_swap_area_counts_not_only_ours() {
+        assert_eq!(swap_areas_in(PROC_SWAPS), 3);
+        assert_eq!(swap_areas_in("Filename\tType\tSize\tUsed\tPriority\n"), 0);
+        assert_eq!(swap_areas_in(""), 0);
+    }
+
+    #[test]
+    fn files_get_bigger_as_their_number_grows() {
+        let base = 512 * MB;
+        let sizes: Vec<u64> = [0, 7, 8, 15, 16, 23]
+            .iter()
+            .map(|n| chunk_for(base, *n, 10) / MB)
+            .collect();
+        assert_eq!(sizes, [512, 512, 1024, 1024, 2048, 2048]);
+    }
+
+    #[test]
+    fn the_last_area_carries_the_largest_file() {
+        let base = 512 * MB;
+        assert_eq!(chunk_for(base, 3, 1) / MB, 2048);
+        assert_eq!(chunk_for(base, 3, 2) / MB, 512);
+    }
+
+    #[test]
+    fn twenty_four_growing_files_hold_more_than_twice_the_flat_capacity() {
+        let base = 512 * MB;
+        let total: u64 =
+            (0..23).map(|n| chunk_for(base, n, 24 - n)).sum::<u64>() + chunk_for(base, 23, 1);
+        assert!(total > 2 * 24 * base, "{} MB", total / MB);
+    }
+
+    #[test]
+    fn failures_wait_longer_each_time_up_to_an_hour() {
+        let waits: Vec<u64> = (1..=11).map(backoff_secs).collect();
+        assert_eq!(
+            waits,
+            [10, 20, 40, 80, 160, 320, 640, 1280, 2560, 3600, 3600]
+        );
+        assert_eq!(backoff_secs(0), 10);
+        assert_eq!(backoff_secs(u32::MAX), 3600);
+    }
+
+    #[test]
+    fn a_swapon_failure_lowers_the_limit_only_when_believable() {
+        assert_eq!(learned_area_limit(24, 23), 23);
+        assert_eq!(learned_area_limit(24, 24), 24, "nothing to learn");
+        assert_eq!(learned_area_limit(24, 30), 24);
+        assert_eq!(learned_area_limit(24, 5), 24, "too few to be the kernel");
+        assert_eq!(learned_area_limit(23, 16), 16);
+    }
+
+    fn activation_failure() -> SwapFileError {
+        SwapFileError::Systemd(crate::systemd::SystemdError::CommandFailed(
+            "systemctl start var-swap-25.swap failed".into(),
+        ))
+    }
+
+    #[test]
+    fn failed_creations_back_off_and_a_success_clears_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut swap = swapfile_in(tmp.path());
+
+        assert!(swap.retry_due());
+        swap.expansion_failed(&SwapFileError::NoSpace, 5);
+        assert!(!swap.retry_due());
+        assert_eq!(swap.failures, 1);
+        swap.expansion_failed(&SwapFileError::NoSpace, 5);
+        assert_eq!(swap.failures, 2);
+
+        swap.expansion_succeeded();
+        assert!(swap.retry_due());
+        assert_eq!(swap.failures, 0);
+    }
+
+    #[test]
+    fn only_a_refused_activation_teaches_the_kernel_limit() {
+        let tmp = tempfile::tempdir().unwrap();
+        for error in [
+            SwapFileError::NoSpace,
+            SwapFileError::Io(std::io::Error::other("mkswap failed")),
+            SwapFileError::Systemd(crate::systemd::SystemdError::Io(std::io::Error::other(
+                "writing the unit",
+            ))),
+        ] {
+            let mut swap = swapfile_in(tmp.path());
+            swap.expansion_failed(&error, 20);
+            assert_eq!(swap.area_limit, KERNEL_SWAP_AREAS, "{error}");
+        }
+
+        let mut swap = swapfile_in(tmp.path());
+        swap.expansion_failed(&activation_failure(), 20);
+        assert_eq!(swap.area_limit, 20);
+        assert!(swap.limit_learned_at.is_some());
+    }
+
+    #[test]
+    fn a_learned_limit_is_forgotten_after_an_hour() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut swap = swapfile_in(tmp.path());
+        swap.expansion_failed(&activation_failure(), 20);
+
+        swap.relax_area_limit();
+        assert_eq!(swap.area_limit, 20, "still fresh");
+
+        swap.limit_learned_at = Instant::now().checked_sub(Duration::from_secs(3601));
+        swap.relax_area_limit();
+        assert_eq!(swap.area_limit, KERNEL_SWAP_AREAS);
+        assert!(swap.limit_learned_at.is_none());
+    }
+
+    #[test]
+    fn a_file_shrinks_to_what_the_disk_can_hold() {
+        let base = 512 * MB;
+        let gb = 1024 * MB;
+        assert_eq!(fit_to_space(2 * gb, base, 100 * gb), 2 * gb);
+        assert_eq!(
+            fit_to_space(2 * gb, base, 3 * gb),
+            gb,
+            "needs twice the size free"
+        );
+        assert_eq!(fit_to_space(2 * gb, base, gb + base), base);
+        assert_eq!(fit_to_space(2 * gb, base, 0), base, "never below the base");
+        assert_eq!(fit_to_space(base, base, 0), base);
+    }
+
+    #[test]
+    fn zram_devices_that_may_still_appear_keep_their_areas() {
+        let swaps = "Filename\tType\tSize\tUsed\tPriority\n\
+            /dev/zram0\tpartition\t1024\t0\t100\n\
+            /dev/zram1\tpartition\t1024\t0\t99\n\
+            /var/swap/1\tfile\t524284\t0\t-1\n";
+        assert_eq!(zram_areas_reserved(swaps, 8), 6);
+        assert_eq!(zram_areas_reserved(swaps, 2), 0);
+        assert_eq!(zram_areas_reserved(PROC_SWAPS, 8), 7);
+        let no_zram = "Filename\tType\tSize\tUsed\tPriority\n/var/swap/1\tfile\t1\t0\t-1\n";
+        assert_eq!(zram_areas_reserved(no_zram, 8), 0, "the pool never started");
+    }
+
+    #[test]
+    fn areas_left_counts_every_area_and_the_zram_reserve() {
+        // zram0 + two files active: 3 areas.
+        assert_eq!(areas_free(PROC_SWAPS, 24, true, 8), (21, 0), "zswap mode");
+        assert_eq!(areas_free(PROC_SWAPS, 24, false, 8), (14, 7), "zram mode");
+        assert_eq!(areas_free(PROC_SWAPS, 3, true, 8), (0, 0), "at the ceiling");
+        assert_eq!(
+            areas_free(PROC_SWAPS, 2, false, 8),
+            (0, 7),
+            "never negative"
+        );
+    }
+
+    #[test]
+    fn without_preallocation_files_stay_at_the_base_size() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut swap = swapfile_in(tmp.path());
+        swap.allocated = 20;
+        swap.is_btrfs = false;
+        assert_eq!(swap.next_chunk(1), swap.config.chunk_size);
+    }
+
+    #[test]
+    fn expansion_needs_room_in_every_limit_and_no_backoff() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut swap = swapfile_in(tmp.path());
+        swap.allocated = 10;
+
+        assert!(swap.may_expand(5));
+        assert!(!swap.may_expand(0), "the kernel has no area left");
+
+        swap.allocated = swap.config.max_count;
+        assert!(!swap.may_expand(5), "our own count is at its limit");
+
+        swap.allocated = 10;
+        swap.disk_full = true;
+        assert!(!swap.may_expand(5));
+
+        swap.disk_full = false;
+        swap.expansion_failed(&SwapFileError::NoSpace, 5);
+        assert!(!swap.may_expand(5), "backing off after a failure");
     }
 }

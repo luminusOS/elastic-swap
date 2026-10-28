@@ -1,4 +1,4 @@
-.TH ELASTIC-SWAP.CONF 5 "OCTOBER 2026" "elastic-swap 0.2.3" elastic-swap.conf
+.TH ELASTIC-SWAP.CONF 5 "OCTOBER 2026" "elastic-swap 0.2.4" elastic-swap.conf
 .\" disable french spacing
 .ss 12 0
 .SH NAME
@@ -122,9 +122,9 @@ full.
 .IP swapfile_path=
 Directory for the swap files (default /var/swap). \fBelastic-swap prepare\fR creates it as a NOCOW btrfs subvolume. It runs with full privileges and does not read /run/elastic-swap/swap.conf.d, so set this key under /etc or /usr/lib.
 .IP swapfile_chunk_size=
-Size of each file (default 512M).
+Size of the first files (default 512M). On btrfs it doubles after every 8 files, twice at most, and the last swap area available gets four times this size, so a large value is scaled too. Other filesystems keep it as is. A file is halved, down to this size, when the disk cannot hold twice its size.
 .IP swapfile_max_count=
-Most files at once, capped at 28 (default 28).
+Most files at once, capped at 24 (default 24), which is the number of swap areas the kernel accepts. Zram devices and partitions count against the same limit.
 .IP swapfile_min_count=
 Files kept even when swap is idle (default 1).
 .IP swapfile_free_ram_perc=

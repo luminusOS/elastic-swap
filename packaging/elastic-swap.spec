@@ -1,5 +1,5 @@
 Name:           elastic-swap
-Version:        0.2.3
+Version:        0.2.4
 Release:        1%{?dist}
 Summary:        Dynamic swap management for zram, zswap and swap files
 # MIT and BSD-3-Clause come from the statically linked crates (see LICENSE.dependencies).
@@ -76,6 +76,18 @@ cargo test --release --locked --offline
 %{_mandir}/man8/elastic-swap.8*
 
 %changelog
+* Wed Oct 28 2026 LuminusOS <noreply@luminusos.invalid> - 0.2.4-1
+- Stop creating swap files when the kernel has no swap area left. After 24
+  files every creation failed at swapon and was retried every 5 seconds for a
+  day, allocating up to 3.6 GB and deleting it each time
+- On btrfs, grow the file size with the file count so capacity does not depend
+  on the number of areas, and give the last free area the largest file
+- Back off after a failed creation: 10 seconds doubling up to an hour, cleared
+  when a removal frees an area
+- Learn the kernel's limit only from a refused swapon, and forget it after an hour
+- Fit a file to the free disk space, and keep areas free for zram devices
+- Default and maximum swapfile_max_count are now 24, not 28
+
 * Sun Oct 25 2026 LuminusOS <noreply@luminusos.invalid> - 0.2.3-1
 - Shrink the swap files by total usage. The zswap mode required more than two
   files with exactly zero use, which round-robin allocation never produces, so

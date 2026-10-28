@@ -165,7 +165,7 @@ fn config_parse_error_on_invalid_typed_value() {
     let cfg = Config::from_file_for_tests(f.path()).unwrap();
     // The typed accessor fails, so from_config falls back to the default.
     let sf = SwapFileConfig::from_config(&cfg).unwrap();
-    assert_eq!(sf.max_count, 28);
+    assert_eq!(sf.max_count, 24);
 }
 
 #[test]

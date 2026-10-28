@@ -9,7 +9,7 @@ It is a systemd service written in Rust, built for image-based systems such as F
 ## What it does
 
 - The default mode is `zswap+swapfile`. The kernel compresses cold pages in RAM, and the daemon manages the files they spill to.
-- Swap files are 512 MB each, up to 28, in `/var/swap`. On btrfs that directory is a NOCOW subvolume.
+- Swap files live in `/var/swap`, which is a NOCOW subvolume on btrfs. On btrfs they start at 512 MB and double after every 8 files, up to 24 files, the number of swap areas the kernel accepted on the machine this was measured on.
 - Other modes are a zram pool with disk overflow, zram only, or a choice made from the hardware.
 - A restarted service adopts the swap that is already active. Stopping it leaves active swap in place.
 
@@ -20,7 +20,7 @@ See [how it works](docs/how-it-works.md) for the thresholds and the zram pool.
 On Fedora 45 (x86_64), install the RPM from the [latest release](https://github.com/luminusOS/elastic-swap/releases/latest):
 
 ```bash
-sudo dnf install https://github.com/luminusOS/elastic-swap/releases/download/v0.2.3/elastic-swap-0.2.3-1.fc45.x86_64.rpm
+sudo dnf install https://github.com/luminusOS/elastic-swap/releases/download/v0.2.4/elastic-swap-0.2.4-1.fc45.x86_64.rpm
 sudo systemctl enable --now elastic-swap
 ```
 

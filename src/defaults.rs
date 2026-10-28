@@ -99,7 +99,7 @@ pub const ZSWAP_ACCEPT_THRESHOLD: &str = "80";
 
 pub const SWAPFILE_PATH: &str = "/var/swap";
 pub const SWAPFILE_CHUNK_SIZE: &str = "512M";
-pub const SWAPFILE_MAX_COUNT: u32 = 28;
+pub const SWAPFILE_MAX_COUNT: u32 = 24;
 pub const SWAPFILE_MIN_COUNT: u32 = 1;
 pub const SWAPFILE_FREE_RAM_PERC: u8 = 20;
 pub const SWAPFILE_FREE_SWAP_PERC: u8 = 40;
